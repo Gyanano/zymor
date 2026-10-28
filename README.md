@@ -12,6 +12,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
 [![Version](https://img.shields.io/badge/Version-v0.1.0-brightgreen)](CHANGELOG.md)
+[![CI](https://github.com/Gyanano/zymor/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyanano/zymor/actions/workflows/ci.yml)
 ![Storage](https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-4b8bbe)
 
 **中文** | [English](README.en.md)
@@ -125,6 +126,10 @@ uv run pytest tests/test_open_smoke.py -q
 | 路径 | 内容 |
 | --- | --- |
 | `docs/guide/` | 快速开始、做梦、MCP 接入、规则检查、排障 |
+| `docs/development/repository-workflow.md` | 开发、评审、发布、分支保护与协作流程 |
+| `CONTRIBUTING.md` | 贡献指南 |
+| `SECURITY.md` | 安全报告流程与边界 |
+| `CODE_OF_CONDUCT.md` | 行为准则 |
 | `GLOSSARY.md` | 领域术语 |
 | `CHANGELOG.md` | 版本变更 |
 
@@ -137,6 +142,10 @@ uv run pytest tests/test_open_smoke.py -q
 - **外部 API 版本靠本地清单**：`zymor anchor --api` 检查 repo 内的 JSON/TOML 版本清单，不轮询远端服务。
 - **语义检索可选**：需要 `[embedding]` 配置并先运行 `zymor index embed`。
 - **MCP HTTP auth 是静态 Bearer token**：没有过期/作用域/吊销；stdio 依赖本机信任模型。
+
+## 贡献
+
+见 [`CONTRIBUTING.md`](CONTRIBUTING.md)、[`SECURITY.md`](SECURITY.md)、[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)，以及 [仓库工作流](docs/development/repository-workflow.md)。
 
 ## License
 

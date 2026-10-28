@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible bug in Zymor
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do not include secrets, API keys, or private vault contents.
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `zymor --version` or the commit SHA.
+      placeholder: "0.1.0 / 598d775"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - CLI
+        - MCP server
+        - dream engine
+        - retrieval / index
+        - write protocol
+        - docs / packaging
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Minimal commands, files, or vault structure needed to reproduce.
+      placeholder: |
+        1. zymor init
+        2. zymor remember ...
+        3. zymor search ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / logs
+      description: Redact secrets and personal paths.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed secrets and private data from this report.
+          required: true

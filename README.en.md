@@ -12,6 +12,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
 [![Version](https://img.shields.io/badge/Version-v0.1.0-brightgreen)](CHANGELOG.md)
+[![CI](https://github.com/Gyanano/zymor/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyanano/zymor/actions/workflows/ci.yml)
 ![Storage](https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-4b8bbe)
 
 [中文](README.md) | **English**
@@ -125,6 +126,10 @@ uv run pytest tests/test_open_smoke.py -q
 | Path | Contents |
 | --- | --- |
 | `docs/guide/` | Quick start, dreaming, MCP integration, rule checks, troubleshooting |
+| `docs/development/repository-workflow.md` | Development, review, release, branch-protection, and collaboration workflow |
+| `CONTRIBUTING.md` | Contribution guide |
+| `SECURITY.md` | Security reporting and boundaries |
+| `CODE_OF_CONDUCT.md` | Code of conduct |
 | `GLOSSARY.md` | Domain vocabulary |
 | `CHANGELOG.md` | Release changes |
 
@@ -137,6 +142,10 @@ uv run pytest tests/test_open_smoke.py -q
 - **External API versions use a local manifest**: `zymor anchor --api` checks a JSON/TOML version manifest in the repo; it does not poll remote services.
 - **Semantic retrieval is optional**: configure `[embedding]` and run `zymor index embed` first.
 - **MCP HTTP auth is a static bearer token**: no expiry/scopes/revocation; stdio relies on local trust.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md), and the [repository workflow](docs/development/repository-workflow.md).
 
 ## License
 
