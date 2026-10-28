@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2400 640" width="2400" height="640">
+  <!-- 深靛蓝背景 (Deep Indigo) -->
+  <rect width="100%" height="100%" fill="#0B1020" rx="48" />
+  
+  <!-- 居中组合容器：左右留白均为 316px，上下留白均为 164px -->
+  <g transform="translate(316, 164)">
+    
+    <!-- 左侧：The Threaded Strata 图标 -->
+    <!-- 内部坐标已归零，最高点 y=0，最低点 y=312 -->
+    <g id="zymor-icon">
+      <!-- L0 Event Stream (最暗，海量原始数据) -->
+      <rect x="0" y="240" width="320" height="72" rx="16" fill="#1A2242" />
+      
+      <!-- L2 Session Capsule (中等明度) -->
+      <rect x="0" y="120" width="320" height="72" rx="16" fill="#2D3A6B" />
+      
+      <!-- L4 Persona Facets (最高明度，表层特征) -->
+      <rect x="0" y="0" width="320" height="72" rx="16" fill="#465A9E" />
+      
+      <!-- Dream Engine Thread (动态提取折线) -->
+      <path d="M 56 276 L 264 276 L 264 156 L 56 156 L 56 36 L 264 36" fill="none" stroke="#8B9FF0" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" />
+            
+      <!-- Knowledge Node (知识节点) -->
+      <circle cx="264" cy="36" r="24" fill="#8B9FF0" />
+    </g>
+
+    <!-- 右侧：字标 (Wordmark) -->
+    <!-- x=460 保证了与图标之间 140px 的精确间距，y=280 实现了与图标的视觉基线居中 -->
+    <text x="460" y="280" fill="#E0E7FF" font-family="system-ui, -apple-system, &#39;Inter&#39;, &#39;Montserrat&#39;, &#39;Helvetica Neue&#39;, sans-serif" font-size="320" font-weight="900" letter-spacing="0.06em">
+      ZYMOR
+    </text>
+    
+  </g>
+</svg>
