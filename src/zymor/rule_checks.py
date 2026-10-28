@@ -7,8 +7,10 @@ from typing import Any
 
 from zymor.errors import ZymorError
 from zymor.invalidation import stale_reasons
+from zymor.store.audit import append_audit
 from zymor.store.index import Index
 from zymor.store.nodes import read_node
+from zymor.util.time import now_iso
 from zymor.vault import Vault
 
 CHECK_KINDS = ("contains", "absent", "regex")
@@ -25,6 +27,7 @@ class RuleCheckDiagnostic:
     value: str
     passed: bool
     message: str = ""
+    repair: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """入参：无。出参：可序列化的检查诊断。"""
@@ -36,6 +39,7 @@ class RuleCheckDiagnostic:
             "value": self.value,
             "passed": self.passed,
             "message": self.message,
+            "repair": self.repair,
         }
 
 
@@ -44,22 +48,50 @@ class RuleCheckReport:
     diagnostics: list[RuleCheckDiagnostic] = field(default_factory=list)
     checked_rules: int = 0
     skipped_rules: int = 0
+    skipped_checks: int = 0
+    unmatched: list[dict[str, str]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    attempt: int = 1
+    max_attempts: int = 3
 
     @property
     def passed(self) -> bool:
         """入参：无。出参：是否全部检查通过。"""
-        return all(item.passed for item in self.diagnostics) and not self.warnings
+        return all(item.passed for item in self.diagnostics)
+
+    @property
+    def next_action(self) -> str:
+        """入参：无。出参：pass、repair 或 stop。"""
+        if self.passed:
+            return "pass"
+        return "repair" if self.attempt < self.max_attempts else "stop"
+
+    @property
+    def repair_instructions(self) -> list[str]:
+        """入参：无。出参：去重后的修复提示。"""
+        return list(
+            dict.fromkeys(
+                item.repair for item in self.diagnostics if not item.passed and item.repair
+            )
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """入参：无。出参：可序列化报告。"""
         failures = [item for item in self.diagnostics if not item.passed]
+        failure_dicts = [item.to_dict() for item in failures]
         return {
             "passed": self.passed,
+            "attempt": self.attempt,
+            "max_attempts": self.max_attempts,
+            "next_action": self.next_action,
             "checked_rules": self.checked_rules,
             "skipped_rules": self.skipped_rules,
+            "skipped_checks": self.skipped_checks,
+            "unmatched": self.unmatched,
             "checks": len(self.diagnostics),
-            "failures": [item.to_dict() for item in failures],
+            "failures": failure_dicts,
+            "violations": failure_dicts,
+            "repair_instructions": self.repair_instructions,
             "diagnostics": [item.to_dict() for item in self.diagnostics],
             "warnings": self.warnings,
         }
@@ -104,9 +136,11 @@ def check_rules(
     files: dict[str, str],
     *,
     task_type: str | None = None,
+    attempt: int = 1,
+    max_attempts: int = 3,
 ) -> RuleCheckReport:
-    """入参：scope、文件内容映射与任务类型。出参：verified L3 规则的检查报告。"""
-    report = RuleCheckReport()
+    """入参：scope、文件内容映射、任务类型与尝试次数。出参：verified L3 规则的检查报告。"""
+    report = RuleCheckReport(attempt=max(1, attempt), max_attempts=max(1, max_attempts))
     seen: set[str] = set()
     for _label, vault in scopes:
         rows = Index(vault.root).layer_rows("L3", statuses=["verified"], limit=5000)
@@ -130,6 +164,7 @@ def check_rules(
             report.checked_rules += 1
             for pattern, kind, value in checks:
                 if kind not in CHECK_KINDS:
+                    message = f"未知检查类型: {kind}"
                     report.diagnostics.append(
                         RuleCheckDiagnostic(
                             node.id,
@@ -138,30 +173,76 @@ def check_rules(
                             kind,
                             value,
                             False,
-                            f"未知检查类型: {kind}",
+                            message,
+                            f"修正规则 {node.title} 的检查类型：{message}",
                         )
                     )
                     continue
                 matched = _match_files(files, pattern)
                 if not matched:
-                    report.diagnostics.append(
-                        RuleCheckDiagnostic(
-                            node.id,
-                            node.title,
-                            pattern,
-                            kind,
-                            value,
-                            False,
-                            "没有匹配的文件",
-                        )
+                    report.skipped_checks += 1
+                    report.unmatched.append(
+                        {
+                            "rule_id": node.id,
+                            "title": node.title,
+                            "pattern": pattern,
+                            "message": "没有匹配的文件",
+                        }
                     )
                     continue
                 for path, text in matched:
                     passed, message = _evaluate(path, text, kind, value)
+                    repair = "" if passed else _repair_instruction(path, kind, value, message)
                     report.diagnostics.append(
-                        RuleCheckDiagnostic(node.id, node.title, path, kind, value, passed, message)
+                        RuleCheckDiagnostic(
+                            node.id, node.title, path, kind, value, passed, message, repair
+                        )
                     )
     return report
+
+
+def record_rule_check(
+    vault: Vault,
+    report: RuleCheckReport,
+    *,
+    session_id: str | None = None,
+    task_type: str | None = None,
+    paths: list[str] | None = None,
+) -> None:
+    """入参：vault、报告、session、任务类型与检查路径。出参：无。追加规则检查审计。"""
+    append_audit(
+        vault,
+        "rules.jsonl",
+        {
+            "ts": now_iso(),
+            "kind": "rule_check",
+            "session_id": session_id,
+            "task_type": task_type,
+            "attempt": report.attempt,
+            "max_attempts": report.max_attempts,
+            "passed": report.passed,
+            "next_action": report.next_action,
+            "checked_rules": report.checked_rules,
+            "skipped_rules": report.skipped_rules,
+            "skipped_checks": report.skipped_checks,
+            "unmatched": report.unmatched,
+            "checks": len(report.diagnostics),
+            "paths": paths or [],
+            "failures": [item.to_dict() for item in report.diagnostics if not item.passed],
+        },
+    )
+
+
+def _repair_instruction(path: str, kind: str, value: str, message: str) -> str:
+    if path == "<invalid>":
+        return f"修正规则检查定义：{message}"
+    if kind == "contains":
+        return f"在 {path} 中加入 {value!r}"
+    if kind == "absent":
+        return f"从 {path} 中移除 {value!r}"
+    if kind == "regex":
+        return f"让 {path} 匹配正则 {value!r}"
+    return f"修正 {path} 的检查：{message}"
 
 
 def _evaluate(path: str, text: str, kind: str, value: str) -> tuple[bool, str]:

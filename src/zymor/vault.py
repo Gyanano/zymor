@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -12,11 +13,13 @@ from typing import Any
 from zymor import __version__
 from zymor.errors import LockedError, NotFoundError, UserError, ValidationError
 from zymor.util.fs import atomic_write_text, ensure_dir
-from zymor.util.time import is_iso, now_iso
+from zymor.util.time import is_iso, now_iso, parse_iso, utc_now
 
 VAULT_VERSION = 1
 VAULT_FILE = "vault.json"
 LOCK_FILE = ".lock"
+LOCK_STALE_SECONDS = 24 * 3600
+LOCK_INIT_GRACE_SECONDS = 60
 VAULT_SUBDIRS = (
     "nodes",
     "atlas",
@@ -27,7 +30,7 @@ VAULT_SUBDIRS = (
     "L0",
     "L1/focus",
 )
-VAULT_GITIGNORE = "L0/\nL1/\nindex/\naudit/\ndream/watermarks.json\n.lock\n"
+VAULT_GITIGNORE = "L0/\nL1/\nindex/\naudit/\ndream/watermarks.json\ncapture/\n.lock\n"
 CONFIG_TEMPLATE = """# Zymor 配置模板；键与默认值见 project configuration documentation
 [vault]
 # path = ".zymor/vault"
@@ -41,16 +44,23 @@ class VaultInfo:
     kind: str
     name: str
     created_at: str
+    project_root: str | None = None
+    project_root_rel: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """入参：无。出参：vault.json 内容字典。"""
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "vault_id": self.vault_id,
             "kind": self.kind,
             "name": self.name,
             "created_at": self.created_at,
         }
+        if self.project_root:
+            payload["project_root"] = self.project_root
+        if self.project_root_rel:
+            payload["project_root_rel"] = self.project_root_rel
+        return payload
 
     @classmethod
     def from_dict(cls, data: Any) -> VaultInfo:
@@ -75,12 +85,20 @@ class VaultInfo:
                 raise UserError(f"vault.json 缺少字段 {field_name}", hint="检查 vault.json")
         if not is_iso(data["created_at"]):
             raise UserError("vault.json 的 created_at 不是合法时间", hint="检查 vault.json")
+        project_root = data.get("project_root")
+        if project_root is not None and not isinstance(project_root, str):
+            raise UserError("vault.json 的 project_root 必须是字符串", hint="检查 vault.json")
+        project_root_rel = data.get("project_root_rel")
+        if project_root_rel is not None and not isinstance(project_root_rel, str):
+            raise UserError("vault.json 的 project_root_rel 必须是字符串", hint="检查 vault.json")
         return cls(
             schema_version=version,
             vault_id=data["vault_id"],
             kind=kind,
             name=data["name"],
             created_at=data["created_at"],
+            project_root=project_root,
+            project_root_rel=project_root_rel,
         )
 
 
@@ -107,6 +125,22 @@ class Vault:
     def __init__(self, root: Path, info: VaultInfo) -> None:
         self.root = root
         self.info = info
+
+    @property
+    def project_root(self) -> Path:
+        """入参：无。出参：项目根目录；优先相对标识，缺失时按 `.zymor/vault` 布局回退。"""
+        candidates: list[Path] = []
+        if self.info.project_root_rel:
+            candidates.append((self.root / self.info.project_root_rel).expanduser())
+        if self.info.project_root:
+            candidates.append(Path(self.info.project_root).expanduser())
+        for candidate in candidates:
+            if candidate.is_dir():
+                return candidate.resolve()
+        parents = self.root.parents
+        if self.info.kind == "project" and len(parents) >= 2:
+            return parents[1]
+        return self.root
 
     @property
     def nodes_dir(self) -> Path:
@@ -212,6 +246,28 @@ class Vault:
             return {"raw": raw}
         return data if isinstance(data, dict) else {"raw": raw}
 
+    def _lock_is_stale(self) -> bool:
+        """入参：无。出参：现有写入锁是否可安全清理。"""
+        try:
+            raw = self.lock_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except OSError:
+            return True
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            started = data.get("started_at")
+            if isinstance(started, str) and is_iso(started):
+                try:
+                    return (utc_now() - parse_iso(started)).total_seconds() > LOCK_STALE_SECONDS
+                except ValueError:
+                    pass
+        try:
+            age = time.time() - self.lock_path.stat().st_mtime
+        except OSError:
+            return True
+        return age > LOCK_INIT_GRACE_SECONDS
+
     @contextmanager
     def writing(self, command: str) -> Iterator[LockHandle]:
         """入参：命令名（写入审计用）。出参：锁句柄上下文。拿不到锁时抛 LockedError。"""
@@ -223,17 +279,25 @@ class Vault:
             "version": __version__,
         }
         ensure_dir(self.root)
-        try:
-            descriptor = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError as error:
-            holder = self.lock_holder() or {}
-            holder_text = (
-                f"pid={holder.get('pid')} host={holder.get('host')} command={holder.get('command')}"
-            )
-            raise LockedError(
-                f"写入锁被占用: {holder_text}",
-                holder=holder,
-            ) from error
+        for attempt in range(2):
+            try:
+                descriptor = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                break
+            except FileExistsError as error:
+                if attempt == 0 and self._lock_is_stale():
+                    self.lock_path.unlink(missing_ok=True)
+                    continue
+                holder = self.lock_holder() or {}
+                holder_text = (
+                    f"pid={holder.get('pid')} host={holder.get('host')} "
+                    f"command={holder.get('command')}"
+                )
+                raise LockedError(
+                    f"写入锁被占用: {holder_text}",
+                    holder=holder,
+                ) from error
+        else:
+            raise LockedError("无法获取写入锁", hint="手工删除 .lock 后重试")
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps(payload, ensure_ascii=False))
@@ -263,8 +327,15 @@ class Vault:
         return cls(resolved, VaultInfo.from_dict(data))
 
     @classmethod
-    def init(cls, root: Path, kind: str, name: str) -> Vault:
-        """入参：根路径、库类型（global/project）、名称。出参：初始化后的 Vault；重复执行幂等。"""
+    def init(
+        cls,
+        root: Path,
+        kind: str,
+        name: str,
+        *,
+        project_root: Path | None = None,
+    ) -> Vault:
+        """入参：根路径、库类型、名称与可选项目根。出参：初始化后的 Vault；重复执行幂等。"""
         if kind not in {"global", "project"}:
             raise ValidationError(f"未知 vault 类型: {kind}", field="kind")
         resolved = root.expanduser().resolve()
@@ -282,12 +353,24 @@ class Vault:
         ensure_dir(resolved)
         for subdir in VAULT_SUBDIRS:
             ensure_dir(resolved / subdir)
+        resolved_project_root: str | None = None
+        resolved_project_root_rel: str | None = None
+        if kind == "project":
+            candidate = project_root
+            if candidate is None and resolved.parent.name == ".zymor":
+                candidate = resolved.parent.parent
+            if candidate is not None:
+                chosen = candidate.expanduser().resolve()
+                resolved_project_root = str(chosen)
+                resolved_project_root_rel = os.path.relpath(chosen, resolved)
         info = VaultInfo(
             schema_version=VAULT_VERSION,
             vault_id=f"vlt_{secrets.token_hex(8)}",
             kind=kind,
             name=name,
             created_at=now_iso(),
+            project_root=resolved_project_root,
+            project_root_rel=resolved_project_root_rel,
         )
         atomic_write_text(
             meta_path, json.dumps(info.to_dict(), ensure_ascii=False, indent=2) + "\n"

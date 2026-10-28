@@ -37,12 +37,37 @@ zymor rule-check --file config.py --file app.py
 zymor rule-check --file config.py --task-type coding --json
 ```
 
+也可以直接检查 Agent 生成的内容：
+
+```bash
+printf 'timeout_ms = 1\n' | zymor rule-check --stdin --path config.py --attempt 1 --max-attempts 3
+```
+
 - 退出码 0 表示所有检查通过；1 表示失败。
-- 输出包含 rule id、title、path、kind、value、message。
+- 输出包含 rule id、title、path、kind、value、message、repair。
+- 未提供匹配文件的检查记为 skip（`skipped_checks`/`unmatched`），不当作失败；需要全量检查时传入所有目标文件。
+- `--attempt` / `--max-attempts` 记录当前修复轮次；失败时输出 `next_action`。
+- `--file` 路径按项目根解析并拒绝项目外文件；与 MCP/harness 使用同一路径语义。
 
-MCP：`memory_rule_check(paths, task_type)`；路径必须在项目根目录内。
+MCP：`memory_rule_check(paths, content, task_type, attempt, max_attempts, session_id)`。
 
-## 4. 边界
+- `paths`：项目内文件路径，相对项目根目录；
+- `content`：`{路径: 文本}`，适合检查尚未落盘的生成内容；
+- 返回 `passed`、`violations`、`repair_instructions`、`next_action`；
+- 每次检查追加一条 `rules.jsonl` 审计记录。
+
+## 4. 修复闭环
+
+Agent 的推荐流程：
+
+1. 生成或修改代码后调用 `memory_rule_check`；
+2. 若 `next_action=repair`，按 `repair_instructions` 修复；
+3. 用 `attempt+1` 再调用；
+4. 若 `next_action=pass`，继续任务；若 `next_action=stop`，报告未修复项，不要静默通过。
+
+`zymor rule-check` 与 MCP 工具的行为保持一致；宿主 Hook/Skill 也复用同一检查语义。
+
+## 5. 边界
 
 - 不做任意命令执行，避免从记忆内容执行 shell。
 - 没有 `## 检查` 的规则只作为上下文注入，不参与检查。

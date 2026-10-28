@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
-[![Version](https://img.shields.io/badge/Version-v0.2.1-brightgreen)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v0.5.0-brightgreen)](CHANGELOG.md)
 [![PyPI](https://img.shields.io/pypi/v/zymor)](https://pypi.org/project/zymor/)
 [![CI](https://github.com/Gyanano/zymor/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyanano/zymor/actions/workflows/ci.yml)
 ![Storage](https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-4b8bbe)
@@ -22,12 +22,15 @@
 
 ## 状态
 
-**v0.1.0 — 记忆内核已完成。** 当前实现覆盖：
+**v0.5.0 — 记忆内核、Memory Loop、Interop 与 Agent Experience 已完成。** 当前实现覆盖：
 
 - **记忆内核**：L0 事件流、L1 焦点、L2 胶囊、L3 知识节点、L4 人格 facet；
 - **检索与上下文**：FTS5 + 标识符子词、评分/过滤、渐进披露、ATLAS/catalog；
 - **写入协议**：门控、去重、状态机、审计、隐私删除；
 - **做梦引擎**：NREM 巩固、认知失调仲裁、REM 联想、人格提炼；
+- **Memory Loop**：规则检查/修复闭环、文件捕获、dream 历史与 `--watch`、stats 健康指标；
+- **互操作**：bundle 导出/导入、`MemoryAdapter` 契约、可移植节点格式；
+- **Agent Experience**：Harness Hook/Skill 契约、本地只读面板；
 - **MCP Server**：stdio / Streamable HTTP，读写与只读模式；
 - **长期记忆**：跨项目 L3 晋升、`projects` provenance、文件/依赖/API 版本锚点、stale 排除、可选 embedding 语义检索与混合检索、`memory_rules` 与 `memory_rule_check`。
 
@@ -87,17 +90,21 @@ uv run --project <repo> zymor mcp             # MCP server（stdio）
 | `zymor init [--global]` | 初始化项目库/用户库 |
 | `zymor write --file PATH \| --stdin` | 写入完整 Markdown 节点 |
 | `zymor remember TEXT [--category ...]` | 快速捕获一条记忆 |
+| `zymor export DIR / import DIR` | 导出/导入可校验节点 bundle |
 | `zymor search QUERY [--semantic]` | 检索（可选混合语义） |
 | `zymor semantic QUERY` | 向量语义检索 |
 | `zymor read ID` | 读取节点 |
 | `zymor log --kind KIND --content TEXT` | 追加 L0 事件 |
+| `zymor capture --path . [--once]` | 轮询文件变化并写入 L0 |
 | `zymor focus --session ID` | 查看/更新 L1 焦点 |
 | `zymor index sync\|rebuild\|catalog\|embed` | 索引、目录、向量维护 |
 | `zymor rules / rule-check` | 读取/执行 verified 项目规则 |
 | `zymor review / answer` | 人工确认与晨间追问 |
 | `zymor promote / adopt / anchor / stale` | 跨项目晋升、采纳、失效锚定 |
-| `zymor dream [--phase ...]` | 运行做梦引擎 |
+| `zymor dream [--phase ...]` | 运行做梦引擎。（`--history N` 查看历史，`--watch` 循环） |
 | `zymor mcp` | 启动 MCP server |
+| `zymor hook context` | 输出宿主会话启动上下文 |
+| `zymor panel` | 启动本地只读记忆面板 |
 | `zymor doctor / stats` | 自检与统计 |
 
 ## MCP 集成
@@ -115,7 +122,7 @@ Claude Code：
 claude mcp add zymor -- uv run --directory <ZYMOR_REPO> zymor mcp
 ```
 
-DSH / Cursor 的完整配置与验收步骤见 [`docs/guide/mcp-integration.md`](docs/guide/mcp-integration.md)。
+DSH / Claude Code 的完整配置与验收步骤见 [`docs/guide/mcp-integration.md`](docs/guide/mcp-integration.md)。
 
 MCP 工具：`memory_context`、`memory_rules`、`memory_rule_check`、`memory_search`、`memory_semantic_search`、`memory_read`、`memory_browse`、`memory_links`、`memory_write`、`memory_focus`、`memory_close`、`memory_log`、`memory_answer`、`memory_dream`、`memory_promote`、`memory_adopt`、`memory_stale`。
 
@@ -133,6 +140,11 @@ uv run pytest tests/test_open_smoke.py -q
 | 路径 | 内容 |
 | --- | --- |
 | `docs/guide/` | 快速开始、做梦、MCP 接入、规则检查、排障 |
+| `docs/guide/migration.md` | 导出/导入与 MemoryAdapter 接口 |
+| `docs/guide/harness-hooks.md` | Harness Hook/Skill 契约与接入 |
+| `integrations/` | Claude Code / Codex 参考接入 |
+| `docs/guide/panel.md` | 本地只读记忆面板 |
+| `docs/guide/validation.md` | 社区验证与问题反馈 |
 | `docs/development/repository-workflow.md` | 开发、评审、发布、分支保护与协作流程 |
 | `docs/development/release.md` | 版本发布、PyPI Trusted Publishing 与 tag 流程 |
 | `CONTRIBUTING.md` | 贡献指南 |

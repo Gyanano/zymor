@@ -28,11 +28,8 @@ PACKAGE_SECTIONS = (
 
 
 def project_root(vault: Vault) -> Path:
-    """入参：项目库或用户库。出参：项目根目录（项目库的 .zymor 上一级）。"""
-    parents = vault.root.parents
-    if vault.info.kind == "project" and len(parents) >= 2:
-        return parents[1]
-    return vault.root
+    """入参：项目库或用户库。出参：项目根目录（由 vault.json 记录或按布局回退）。"""
+    return vault.project_root
 
 
 def file_anchor(vault: Vault, file_path: Path) -> str:

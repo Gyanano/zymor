@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from zymor.errors import NotFoundError, ValidationError
+from zymor.errors import NotFoundError, ValidationError, ZymorError
+from zymor.invalidation import stale_reasons
 from zymor.store.audit import append_audit, read_audit
 from zymor.store.index import Index
 from zymor.store.nodes import read_node, update_node
-from zymor.util.time import now_iso
+from zymor.util.time import now_iso, parse_iso
 from zymor.vault import Vault
 
 REVIEW_STATUSES = ("hypothesis", "disputed")
@@ -51,26 +53,96 @@ def forget_node(vault: Vault, node_id: str, *, command: str = "forget") -> dict[
 def write_stats(vault: Vault) -> dict[str, Any]:
     """入参：vault。出参：写入动作计数与 L0 事件数（stats 命令用）。"""
     counts: dict[str, int] = {}
+    degraded = 0
     for record in read_audit(vault.writes_audit_path):
-        if record.get("op") != "commit":
+        action = record.get("action")
+        if isinstance(action, str) and action:
+            counts[action] = counts.get(action, 0) + 1
+        if record.get("degraded") is True:
+            degraded += 1
+        if record.get("op") != "commit" or action:
             continue
-        action = str(record.get("action") or record.get("kind") or "unknown")
-        counts[action] = counts.get(action, 0) + 1
+        if record.get("command") == "read":
+            continue
+        kind = str(record.get("kind") or "unknown")
+        counts[kind] = counts.get(kind, 0) + 1
     l0_files = sorted(vault.l0_dir.glob("*.jsonl"))
     l0_events = 0
     for path in l0_files:
         with path.open("r", encoding="utf-8") as handle:
             l0_events += sum(1 for line in handle if line.strip())
     gate_rejections = counts.get("rejected-gate", 0)
+    rule_records = read_audit(vault.audit_dir / "rules.jsonl")
+    retrieval_records = read_audit(vault.retrieval_audit_path)
+    dream_records = _dream_run_records(vault)
     return {
         "write_actions": counts,
         "gate_rejections": gate_rejections,
         "conflicts": counts.get("conflict", 0),
         "supersedes": counts.get("supersede", 0),
         "append_evidence": counts.get("append-evidence", 0),
-        "degraded": counts.get("degraded", 0),
+        "degraded": degraded,
         "l0_events": l0_events,
+        "dream_runs": len(dream_records),
+        "dream_failures": sum(1 for item in dream_records if item["status"] == "failed"),
+        "last_dream_at": _latest_ts(
+            [item.get("finished_at") or item.get("started_at") for item in dream_records]
+        ),
+        "rule_checks": len(rule_records),
+        "rule_check_failures": sum(1 for item in rule_records if item.get("passed") is False),
+        "last_rule_check_at": _latest_ts([item.get("ts") for item in rule_records]),
+        "retrievals": len(retrieval_records),
+        "retrieval_reads": sum(1 for item in retrieval_records if item.get("kind") == "read"),
+        "stale_nodes": _stale_count(vault),
     }
+
+
+def _stale_count(vault: Vault, *, limit: int = 10000) -> int:
+    count = 0
+    for row in Index(vault.root).layer_rows("L3", limit=limit):
+        try:
+            node, _ = read_node(vault, str(row["id"]))
+        except ZymorError:
+            continue
+        if stale_reasons(vault, node):
+            count += 1
+    return count
+
+
+def _dream_run_records(vault: Vault) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for path in sorted(vault.runs_dir.glob("*.json"), key=lambda item: item.stat().st_mtime):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        raw_report = data.get("report")
+        report: dict[str, Any] = raw_report if isinstance(raw_report, dict) else {}
+        records.append(
+            {
+                "status": str(data.get("status") or "unknown"),
+                "ok": bool(report.get("ok", data.get("status") == "completed")),
+                "started_at": data.get("started_at"),
+                "finished_at": data.get("finished_at"),
+            }
+        )
+    return records
+
+
+def _latest_ts(values: list[Any]) -> str | None:
+    parsed: list[tuple[Any, str]] = []
+    for value in values:
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            parsed.append((parse_iso(value), value))
+        except ValueError:
+            continue
+    if not parsed:
+        return None
+    return max(parsed, key=lambda item: item[0])[1]
 
 
 def confirm_persona_draft(

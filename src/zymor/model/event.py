@@ -78,6 +78,16 @@ def l0_path(l0_dir: Path, moment: datetime | None = None) -> Path:
     return l0_dir / f"{utc_date(moment)}.jsonl"
 
 
+def max_session_seq(l0_dir: Path, session_id: str) -> int:
+    """入参：L0 目录与会话标识。出参：该会话跨所有日期文件的最大 seq。"""
+    highest = 0
+    for path in sorted(l0_dir.glob("*.jsonl")):
+        for entry in iter_events(path):
+            if entry.session_id == session_id and entry.seq > highest:
+                highest = entry.seq
+    return highest
+
+
 def max_seq(l0_file: Path, session_id: str) -> int:
     """入参：L0 文件与会话标识。出参：该会话在本文件中的最大 seq（无记录为 0）。"""
     if not l0_file.is_file():
@@ -126,7 +136,7 @@ def append_event(
     moment = parse_iso(ts) if ts is not None else None
     target = l0_path(l0_dir, moment)
     target.parent.mkdir(parents=True, exist_ok=True)
-    highest = max_seq(target, session_id)
+    highest = max_session_seq(l0_dir, session_id)
     assigned = seq if seq is not None and seq > highest else highest + 1
     entry = EventEntry(
         schema_version=1,

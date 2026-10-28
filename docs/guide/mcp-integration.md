@@ -1,4 +1,4 @@
-﻿# MCP 接入（DSH / Claude Code / Cursor）
+# MCP 接入（DSH / Claude Code）
 
 Zymor 以 **MCP Server** 接入任意宿主：tool-first，记忆内容只通过工具返回；`instructions` 短协议要求 Agent 在会话开始/压缩后/任务切换时调用 `memory_context`。
 
@@ -43,18 +43,6 @@ uv run zymor mcp --read-only
 claude mcp add zymor -- uv run --directory <ZYMOR_REPO> zymor mcp
 ```
 
-## Cursor
-
-`.cursor/mcp.json`：
-
-```json
-{
-  "mcpServers": {
-    "zymor": {"command": "uv", "args": ["run", "--directory", "<ZYMOR_REPO>", "zymor", "mcp"]}
-  }
-}
-```
-
 ## 验收步骤
 
 1. 新会话中模型可见 `mcp__zymor__*` 工具；
@@ -64,7 +52,7 @@ claude mcp add zymor -- uv run --directory <ZYMOR_REPO> zymor mcp
 
 ## 工具与资源
 
-- 工具：`memory_context`、`memory_search`、`memory_read`、`memory_browse`、`memory_links`；读写模式下另有 `memory_write`、`memory_focus`、`memory_close`、`memory_log`、`memory_answer`、`memory_dream`。
+- 工具：`memory_context`、`memory_rules`、`memory_rule_check`、`memory_search`、`memory_semantic_search`、`memory_read`、`memory_browse`、`memory_links`；读写模式下另有 `memory_write`、`memory_focus`、`memory_close`、`memory_log`、`memory_answer`、`memory_dream`、`memory_promote`、`memory_adopt`、`memory_stale`。
 - resources：`zymor://atlas`、`zymor://catalog/<category>`、`zymor://node/<id>`（需日志更新后由工具按需读取，不保证自动注入）。
 - prompts：`zymor-boot`、`zymor-review`；DSH 不支持 MCP prompts，代码不依赖它。
 

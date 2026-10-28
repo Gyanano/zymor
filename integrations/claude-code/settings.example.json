@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/zymor/integrations/claude-code/session-start.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

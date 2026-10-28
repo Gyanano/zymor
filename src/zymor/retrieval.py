@@ -206,6 +206,7 @@ def memory_search(
     token_budget: int | None = None,
     task_type: str | None = None,
     session_id: str | None = None,
+    record_audit: bool = True,
 ) -> SearchResult:
     """入参：scope 列表、查询、设置与过滤；`top_k=8` 表示未指定并用 `settings.default_top_k`，
     `include_deprecated=True` 与 `valid_only=True` 正交，检索 deprecated 需同时 `valid_only=False`。
@@ -231,17 +232,18 @@ def memory_search(
 
     if not match_query:
         warnings.append("查询为空：请提供至少一个可检索词项（中英文均可）")
-        _write_audit(
-            audit_vault,
-            kind="search",
-            scope=scope_text,
-            returned=[],
-            tokens_estimate=0,
-            latency_ms=_elapsed_ms(started),
-            session_id=session_key,
-            query=query_text,
-            warnings=warnings,
-        )
+        if record_audit:
+            _write_audit(
+                audit_vault,
+                kind="search",
+                scope=scope_text,
+                returned=[],
+                tokens_estimate=0,
+                latency_ms=_elapsed_ms(started),
+                session_id=session_key,
+                query=query_text,
+                warnings=warnings,
+            )
         return SearchResult(hits=[], tokens_estimate=0, truncated=False, warnings=warnings)
 
     statuses = _effective_statuses(active_filters)
@@ -249,17 +251,18 @@ def memory_search(
         warnings.append(
             "status 过滤后没有可检索状态：deprecated 需同时设置 include_deprecated=True"
         )
-        _write_audit(
-            audit_vault,
-            kind="search",
-            scope=scope_text,
-            returned=[],
-            tokens_estimate=0,
-            latency_ms=_elapsed_ms(started),
-            session_id=session_key,
-            query=query_text,
-            warnings=warnings,
-        )
+        if record_audit:
+            _write_audit(
+                audit_vault,
+                kind="search",
+                scope=scope_text,
+                returned=[],
+                tokens_estimate=0,
+                latency_ms=_elapsed_ms(started),
+                session_id=session_key,
+                query=query_text,
+                warnings=warnings,
+            )
         return SearchResult(hits=[], tokens_estimate=0, truncated=False, warnings=warnings)
 
     updated_since: datetime | None = None
@@ -355,17 +358,18 @@ def memory_search(
             "无匹配结果：可换关键词、放宽 status 过滤；需要历史节点时设置 "
             "include_deprecated=True 且 valid_only=False"
         )
-    _write_audit(
-        audit_vault,
-        kind="search",
-        scope=scope_text,
-        returned=[hit.id for hit in hits],
-        tokens_estimate=tokens_estimate,
-        latency_ms=_elapsed_ms(started),
-        session_id=session_key,
-        query=query_text,
-        warnings=warnings,
-    )
+    if record_audit:
+        _write_audit(
+            audit_vault,
+            kind="search",
+            scope=scope_text,
+            returned=[hit.id for hit in hits],
+            tokens_estimate=tokens_estimate,
+            latency_ms=_elapsed_ms(started),
+            session_id=session_key,
+            query=query_text,
+            warnings=warnings,
+        )
     return SearchResult(
         hits=hits, tokens_estimate=tokens_estimate, truncated=truncated, warnings=warnings
     )
@@ -377,9 +381,11 @@ def memory_read(
     *,
     max_tokens: int = 1500,
     session_id: str | None = None,
+    count_hit: bool = True,
+    record_audit: bool = True,
 ) -> ReadResult:
-    """入参：scope 列表、节点 id、预算与会话。出参：节点与截断信息。
-    读取节点并累计 hit_count；`dedup:true` 表示本次读取计入 hit_count（会话首读），回放按此累加。
+    """入参：scope 列表、节点 id、预算、会话与写入开关。出参：节点与截断信息。
+    读取节点；`count_hit=True` 时累计 hit_count，`record_audit=False` 时跳过检索审计。
     """
     started = time.perf_counter()
     if not scopes:
@@ -409,11 +415,13 @@ def memory_read(
         )
     node, path = read_node(found_vault, node_id)
     session_key = session_id or ""
-    counted = True
-    if session_id:
-        counted = not _already_counted(audit_vault, node_id, session_key)
-    if counted:
-        node = record_hit(found_vault, node_id)
+    counted = False
+    if count_hit:
+        counted = True
+        if session_id:
+            counted = not _already_counted(audit_vault, node_id, session_key)
+        if counted:
+            node = record_hit(found_vault, node_id)
     budget = max(0, max_tokens)
     warnings: list[str] = []
     summary_tokens = estimate_tokens(node.summary)
@@ -432,18 +440,19 @@ def memory_read(
         if tokens_estimate > budget:
             tokens_estimate = budget
         warnings.append("正文已按 max_tokens 截断：优先保留 summary")
-    _write_audit(
-        audit_vault,
-        kind="read",
-        scope=found_label,
-        returned=[node_id],
-        tokens_estimate=tokens_estimate,
-        latency_ms=_elapsed_ms(started),
-        session_id=session_key,
-        node_id=node_id,
-        dedup=counted,
-        warnings=warnings,
-    )
+    if record_audit:
+        _write_audit(
+            audit_vault,
+            kind="read",
+            scope=found_label,
+            returned=[node_id],
+            tokens_estimate=tokens_estimate,
+            latency_ms=_elapsed_ms(started),
+            session_id=session_key,
+            node_id=node_id,
+            dedup=counted,
+            warnings=warnings,
+        )
     return ReadResult(
         node=result_node,
         path=found_vault.relative(path),

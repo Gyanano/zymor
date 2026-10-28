@@ -10,12 +10,14 @@ uv run zymor dream                           # NREM + 仲裁 + REM（按配置�
 uv run zymor dream --phase nrem              # 单独阶段
 uv run zymor dream --phase arbitration
 uv run zymor dream --budget-usd 0.5          # 覆盖本次费用上限
+uv run zymor dream --watch --interval 300    # 可选：循环运行，Ctrl+C 停止
 ```
 
 - 锁：`<vault>/.dream.lock`，同一 vault 同时只跑一个 run；stale 锁超过 2 小时自动清理。
 - 水位线：`dream/watermarks.json` 记录每会话 `last_seq`；只处理水位线之后的 L0 事件。
 - 预算：`[dream.budget]` 的 `max_llm_calls / max_usd / max_nodes_changed` 超限后优雅停止。
 - 审计：每次 run 写 `dream/runs/<run_id>.json` 与 `dream/log.jsonl`；收尾刷新 ATLAS/catalog。
+- 历史：`zymor dream --history 10` 列出最近 run 的 ok/status/phases；`zymor stats` 汇总 run 数、失败数与最近时间。
 
 ## 阶段做什么
 

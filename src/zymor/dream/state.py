@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,7 +16,8 @@ from zymor.util.time import is_iso, now_iso, parse_iso, utc_now
 from zymor.vault import Vault
 
 WATERMARKS_VERSION = 1
-LOCK_STALE_SECONDS = 2 * 3600
+LOCK_STALE_SECONDS = 24 * 3600
+LOCK_INIT_GRACE_SECONDS = 60
 
 
 @dataclass
@@ -118,9 +120,14 @@ class DreamLock:
                 if holder is not None and cls._is_stale(holder):
                     lock_path.unlink(missing_ok=True)
                     continue
+                if holder is None and cls._file_is_stale(lock_path):
+                    lock_path.unlink(missing_ok=True)
+                    continue
                 holder_text = (
                     f"pid={holder.get('pid')} host={holder.get('host')} "
                     f"started={holder.get('started_at')}"
+                    if holder is not None
+                    else "锁文件正在初始化"
                 )
                 raise LockedError(
                     f"另一个做梦任务正在运行: {holder_text}",
@@ -134,12 +141,20 @@ class DreamLock:
         )
 
     @staticmethod
-    def _read_holder(path: Path) -> dict[str, Any]:
+    def _read_holder(path: Path) -> dict[str, Any] | None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {}
-        return data if isinstance(data, dict) else {}
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _file_is_stale(path: Path) -> bool:
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            return True
+        return age > LOCK_INIT_GRACE_SECONDS
 
     @staticmethod
     def _is_stale(holder: dict[str, Any]) -> bool:
@@ -154,7 +169,9 @@ class DreamLock:
 
     def release(self) -> None:
         """入参：无。出参：无。释放做梦锁（仅当仍属于本进程时删除）。"""
-        holder = self._read_holder(self.path) or {}
+        holder = self._read_holder(self.path)
+        if holder is None:
+            return
         if holder.get("pid") == self.payload.get("pid") and holder.get(
             "started_at"
         ) == self.payload.get("started_at"):
@@ -169,6 +186,37 @@ def run_dir(vault: Vault) -> Path:
 def run_record_path(vault: Vault, run_id: str) -> Path:
     """入参：vault 与 run id。出参：run 记录路径。"""
     return vault.runs_dir / f"{run_id}.json"
+
+
+def list_run_records(vault: Vault, *, limit: int = 20) -> list[dict[str, Any]]:
+    """入参：vault 与上限。出参：按结束时间倒序的 dream run 摘要。"""
+    records: list[dict[str, Any]] = []
+    paths = sorted(
+        vault.runs_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True
+    )
+    for path in paths[: max(0, limit)]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        raw_report = data.get("report")
+        report: dict[str, Any] = raw_report if isinstance(raw_report, dict) else {}
+        records.append(
+            {
+                "run_id": str(data.get("run_id") or path.stem),
+                "status": str(data.get("status") or "unknown"),
+                "started_at": data.get("started_at"),
+                "finished_at": data.get("finished_at"),
+                "phases": list(data.get("phases") or []),
+                "ok": bool(report.get("ok", data.get("status") == "completed")),
+                "errors": list(report.get("errors") or []),
+                "warnings": list(report.get("warnings") or []),
+                "budget": data.get("budget"),
+            }
+        )
+    return records
 
 
 def write_run_record(vault: Vault, run_id: str, record: dict[str, Any]) -> Path:
@@ -188,19 +236,23 @@ def append_dream_log(vault: Vault, record: dict[str, Any]) -> None:
 
 
 def cleanup_l0(vault: Vault, retention_days: int) -> list[str]:
-    """入参：vault 与保留天数。出参：被删除的 L0 文件名。只删超过保留期的日期文件。"""
+    """入参：vault 与保留天数。出参：被删除的 L0 文件名。保留仍有未消费事件的日期文件。"""
     if retention_days <= 0:
         return []
     threshold = (utc_now() - timedelta(days=retention_days)).date()
+    watermarks = Watermarks.load(vault)
     removed: list[str] = []
     for path in sorted(vault.l0_dir.glob("*.jsonl")):
         try:
             day = datetime.strptime(path.stem, "%Y-%m-%d").date()
         except ValueError:
             continue
-        if day < threshold:
-            path.unlink(missing_ok=True)
-            removed.append(path.name)
+        if day >= threshold:
+            continue
+        if any(entry.seq > watermarks.last_seq(entry.session_id) for entry in iter_events(path)):
+            continue
+        path.unlink(missing_ok=True)
+        removed.append(path.name)
     return removed
 
 
