@@ -62,11 +62,12 @@
 
 ### Known limitations
 
-- 无 OpenAI 兼容通道：headline 分数与竞品复跑未产出；只提交 local-protocol harness 冒烟（不可解释）。
-- MCP-only 捕获依赖 Agent 调用 `memory_log`；无宿主桥。
-- 无常驻做梦守护进程；REM/人格质量仅用脚本化假 LLM 验证；P6 人工荒谬率待抽检。
-- 仲裁不执行本地命令；跨项目 L3→用户库晋升未实现；胶囊降权为每次 run 的离散步进。
+- 无 OpenAI 兼容通道时，headline 分数与竞品复跑不可用；只提交 local-protocol harness 冒烟。
+- 捕获通过 `zymor capture`、CLI `memory_log` 或宿主 Hook 显式触发，不是全自动后台服务。
+- `zymor dream --watch` 是前台循环，无常驻守护进程；胶囊降权按 run 离散步进。
+- 仲裁不执行本地命令。
 
 [0.1.0]: https://github.com/Gyanano/zymor/releases/tag/v0.1.0
 [0.2.0]: https://github.com/Gyanano/zymor/releases/tag/v0.2.0
 [0.2.1]: https://github.com/Gyanano/zymor/releases/tag/v0.2.1
+[0.5.0]: https://github.com/Gyanano/zymor/releases/tag/v0.5.0
