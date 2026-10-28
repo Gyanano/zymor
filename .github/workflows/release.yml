@@ -23,7 +23,7 @@ jobs:
           enable-cache: true
       - name: Verify tag matches project version
         run: |
-          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           test "v$version" = "$GITHUB_REF_NAME"
       - name: Build sdist and wheel
         run: uv build
