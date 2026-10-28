@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
-## [Unreleased]
+## [0.2.0] - 2026-10-28
 
 ### Added
 
@@ -13,6 +13,8 @@
 - 检索：FTS5 索引同时写入 snake_case/camelCase 子词，查询生成 `原词 OR 子词`；`meta.tokenizer` 升到 `cjk-bigram-v2-identifiers`，版本不符自动重建索引；新增可选 embedding 向量索引（`zymor index embed`）与 `memory_semantic_search`/`zymor semantic`；`search --semantic` / `include_semantic` 融合词法与向量命中。
 - MCP：新增 `memory_promote`、`memory_adopt`、`memory_stale` 三个写工具，Agent 可直接跨项目晋升/采纳/检查失效。
 - 检索：新增 `memory_rules` / `zymor rules`，直接返回 verified L3 规则（task_type 过滤、token 预算 400），供 Agent 在会话开始/任务切换时加载项目约定；新增 `memory_rule_check` / `zymor rule-check`，按规则正文 `## 检查` 的 contains/absent/regex 约束做只读校验。
+- 开源发布工程：最小功能冒烟测试、GitHub Actions CI（ruff / mypy / Python 3.12 + 3.13）、Dependabot（uv + GitHub Actions）、CodeQL、main/tag ruleset、PyPI Trusted Publishing workflow。
+- 协作与发布文档：中英双语 README、主题自适应 Logo、CONTRIBUTING、SECURITY、CODE_OF_CONDUCT、issue/PR 模板、仓库工作流与发布指南。
 
 ## [0.1.0] - 2026-10-27
 
@@ -32,4 +34,5 @@
 - 无常驻做梦守护进程；REM/人格质量仅用脚本化假 LLM 验证；P6 人工荒谬率待抽检。
 - 仲裁不执行本地命令；跨项目 L3→用户库晋升未实现；胶囊降权为每次 run 的离散步进。
 
-[0.1.0]: https://github.com/zymor/zymor/releases/tag/v0.1.0
+[0.1.0]: https://github.com/Gyanano/zymor/releases/tag/v0.1.0
+[0.2.0]: https://github.com/Gyanano/zymor/releases/tag/v0.2.0
