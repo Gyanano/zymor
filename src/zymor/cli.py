@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 import sys
+import time
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +35,13 @@ from zymor.store.index import Index
 from zymor.store.nodes import read_node, update_node, write_node
 from zymor.util.fs import atomic_write_text
 from zymor.util.time import now_iso
-from zymor.vault import CONFIG_TEMPLATE, Vault, project_vault_root, resolve_vault
+from zymor.vault import (
+    CONFIG_TEMPLATE,
+    Vault,
+    project_root_for,
+    project_vault_root,
+    resolve_vault,
+)
 from zymor.write_service import (
     memory_write,
     read_dissonance,
@@ -86,6 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remember.add_argument("--layer", choices=("L2", "L3"), default="L3")
 
+    export = sub.add_parser("export", parents=[common], help="导出可校验的节点 bundle")
+    export.add_argument("output", type=Path)
+    import_parser = sub.add_parser("import", parents=[common], help="导入节点 bundle")
+    import_parser.add_argument("bundle", type=Path)
+    import_parser.add_argument("--mode", choices=("skip", "overwrite"), default="skip")
+
     search = sub.add_parser("search", parents=[common], help="检索节点")
     search.add_argument("query")
     search.add_argument(
@@ -108,6 +122,14 @@ def build_parser() -> argparse.ArgumentParser:
     log.add_argument("--content", required=True)
     log.add_argument("--session", default="cli")
 
+    capture = sub.add_parser("capture", parents=[common], help="轮询项目文件变化并写入 L0")
+    capture.add_argument("--path", default=".", help="项目内待监听目录")
+    capture.add_argument("--interval", type=float, default=5.0, help="轮询间隔秒")
+    capture.add_argument("--session", default=None, help="默认自动生成 capture-<时间>")
+    capture.add_argument("--once", action="store_true", help="只轮询一次后退出")
+    capture.add_argument("--ignore", action="append", default=[], help="额外忽略 glob（可重复）")
+    capture.add_argument("--max-events", type=int, default=50, help="单轮最多写入事件数")
+
     index = sub.add_parser("index", parents=[common], help="索引维护")
     index_sub = index.add_subparsers(dest="index_command", required=True)
     index_sub.add_parser("sync", parents=[common], help="增量同步索引")
@@ -120,13 +142,19 @@ def build_parser() -> argparse.ArgumentParser:
     semantic.add_argument("--top-k", type=int, default=None)
 
     rules = sub.add_parser("rules", parents=[common], help="读取 verified 项目规则")
-    rules.add_argument("--task-type", choices=TASK_TYPES, default=None)
+    rules.add_argument("--task-type", default=None)
     rules.add_argument("--limit", type=int, default=5)
     rules.add_argument("--token-budget", type=int, default=400)
 
     rule_check = sub.add_parser("rule-check", parents=[common], help="用 verified 规则检查文件")
-    rule_check.add_argument("--file", action="append", required=True, help="可重复")
-    rule_check.add_argument("--task-type", choices=TASK_TYPES, default=None)
+    rule_check.add_argument("--file", action="append", default=[], help="可重复")
+    rule_check.add_argument("--stdin", action="store_true", help="从标准输入读取待检查内容")
+    rule_check.add_argument(
+        "--path", default="<stdin>", help="stdin 对应的项目内虚拟路径（如 config.py）"
+    )
+    rule_check.add_argument("--task-type", default=None)
+    rule_check.add_argument("--attempt", type=int, default=1, help="当前修复轮次（从 1 开始）")
+    rule_check.add_argument("--max-attempts", type=int, default=3, help="最大修复轮次")
 
     review = sub.add_parser("review", parents=[common], help="列出待人工确认的节点")
     review.add_argument("--status", action="append", choices=("hypothesis", "disputed"))
@@ -185,6 +213,21 @@ def build_parser() -> argparse.ArgumentParser:
     dream.add_argument("--phase", choices=("nrem", "arbitration", "rem", "all"), default="all")
     dream.add_argument("--dry-run", action="store_true", help="只输出计划，不写文件、不调 LLM")
     dream.add_argument("--budget-usd", type=float, default=None)
+    dream.add_argument("--history", type=int, default=None, metavar="N", help="列出最近 N 次 run")
+    dream.add_argument("--watch", action="store_true", help="循环运行 dream（Ctrl+C 停止）")
+    dream.add_argument("--interval", type=float, default=300.0, help="--watch 的运行间隔秒")
+
+    hook = sub.add_parser("hook", parents=[common], help="宿主 Hook/Skill 接入入口")
+    hook_sub = hook.add_subparsers(dest="hook_command", required=True)
+    hook_context = hook_sub.add_parser("context", parents=[common], help="输出会话启动上下文")
+    hook_context.add_argument("--task", default=None)
+    hook_context.add_argument("--project", default=None)
+    hook_context.add_argument("--budget-tokens", type=int, default=None)
+    hook_context.add_argument("--session-id", default=None)
+
+    panel = sub.add_parser("panel", parents=[common], help="启动只读记忆面板")
+    panel.add_argument("--host", default="127.0.0.1")
+    panel.add_argument("--port", type=int, default=8765)
 
     mcp = sub.add_parser("mcp", parents=[common], help="启动 MCP Server")
     mcp.add_argument("--transport", choices=("stdio", "http"), default=None)
@@ -209,7 +252,6 @@ def _context(args: argparse.Namespace) -> tuple[Config, Vault]:
     config = load_config()
     vault = resolve_vault(config, _flag(args, "vault", None))
     return config, vault
-
 
 
 def _scopes(config: Config, vault: Vault) -> list[tuple[str, Vault]]:
@@ -253,7 +295,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         name = cwd.name
     existed = (root / "vault.json").is_file()
-    vault = Vault.init(root, kind, name)
+    chosen_project_root = cwd if cli_vault else (project_root_for(cwd) or cwd)
+    vault = Vault.init(
+        root,
+        kind,
+        name,
+        project_root=chosen_project_root if kind == "project" else None,
+    )
     if root.parent.name == ".zymor":
         config_path = root.parent / "config.toml"
         if not config_path.is_file():
@@ -332,29 +380,98 @@ def cmd_remember(args: argparse.Namespace) -> int:
 
 
 def cmd_rule_check(args: argparse.Namespace) -> int:
-    from zymor.rule_checks import check_rules
+    from zymor.invalidation import project_root
+    from zymor.rule_checks import check_rules, record_rule_check
 
     config, vault = _context(args)
+    root = project_root(vault).resolve()
     files: dict[str, str] = {}
     for raw in args.file:
-        path = Path(raw)
+        path = Path(raw).resolve()
         if not path.is_file():
             raise UsageError(f"文件不存在: {raw}")
-        files[path.as_posix()] = path.read_text(encoding="utf-8")
-    report = check_rules(_scopes(config, vault), files, task_type=args.task_type)
+        if not path.is_relative_to(root):
+            raise UsageError(f"文件不在项目内: {raw}")
+        files[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")
+    if args.stdin:
+        virtual = Path(args.path.replace("\\", "/"))
+        if not args.path or virtual.is_absolute() or ".." in virtual.parts:
+            raise UsageError(f"stdin 虚拟路径非法: {args.path}")
+        files[virtual.as_posix()] = sys.stdin.read()
+    if not files:
+        raise UsageError("至少提供 --file 或 --stdin")
+    report = check_rules(
+        _scopes(config, vault),
+        files,
+        task_type=args.task_type,
+        attempt=args.attempt,
+        max_attempts=args.max_attempts,
+    )
+    record_rule_check(
+        vault,
+        report,
+        session_id=None,
+        task_type=args.task_type,
+        paths=sorted(files),
+    )
     payload = report.to_dict()
     if report.diagnostics:
         lines = [
             ("PASS" if item.passed else "FAIL")
             + f" {item.title} [{item.path}] {item.kind}={item.value}"
             + (f"：{item.message}" if item.message else "")
+            + (f" → {item.repair}" if item.repair else "")
             for item in report.diagnostics
         ]
+        lines.append(f"attempt {report.attempt}/{report.max_attempts} → {report.next_action}")
+        if report.skipped_checks:
+            lines.append(f"跳过 {report.skipped_checks} 个无匹配文件的检查")
         human = "\n".join(lines)
+    elif report.skipped_checks:
+        human = (
+            f"没有可执行检查：{report.skipped_checks} 个检查没有匹配文件（如需检查请传入对应文件）"
+        )
     else:
         human = "没有可执行检查的 verified 规则"
     _emit(args, payload, human)
     return 0 if report.passed else 1
+
+
+def cmd_capture(args: argparse.Namespace) -> int:
+    from zymor.capture import DEFAULT_IGNORE, run_capture
+    from zymor.invalidation import project_root
+
+    _config, vault = _context(args)
+    if vault.info.kind != "project":
+        raise UsageError("capture 只监听项目库", hint="在项目目录运行，或改用项目库 --vault")
+    root = project_root(vault).resolve()
+    watch = (root / args.path).resolve()
+    if not watch.is_relative_to(root) or not watch.is_dir():
+        raise UsageError(f"监听路径必须是项目内目录: {args.path}")
+    if args.interval <= 0:
+        raise UsageError("--interval 必须大于 0")
+    session_id = args.session or f"capture-{datetime.now().strftime('%Y%m%dT%H%M%S')}"
+    try:
+        result = run_capture(
+            vault,
+            watch,
+            session_id=session_id,
+            interval_s=args.interval,
+            ignore=tuple(DEFAULT_IGNORE) + tuple(args.ignore),
+            max_events=args.max_events,
+            once=args.once,
+        )
+    except KeyboardInterrupt:
+        result = {"captured": 0, "polls": 0, "warnings": ["已停止"]}
+    payload = {"session_id": session_id, "path": watch.relative_to(root).as_posix(), **result}
+    lines = [
+        f"capture: {result['captured']} events / {result['polls']} polls",
+        f"pending: {result.get('pending', 0)}",
+        f"session: {session_id}",
+    ]
+    lines.extend(f"提示: {warning}" for warning in result["warnings"])
+    _emit(args, payload, "\n".join(lines))
+    return 0
 
 
 def cmd_rules(args: argparse.Namespace) -> int:
@@ -401,6 +518,38 @@ def cmd_semantic(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    from zymor.bundle import export_bundle
+
+    _config, vault = _context(args)
+    result = export_bundle(vault, args.output)
+    human = f"已导出 {result['node_count']} 个节点 → {result['path']}"
+    _emit(args, result, human)
+    return 0
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    from zymor.bundle import import_bundle
+
+    _config, vault = _context(args)
+    result = import_bundle(vault, args.bundle, mode=args.mode)
+    human = f"已导入 {result['imported']} 个节点（跳过 {result['skipped']}）← {result['path']}"
+    _emit(args, result, human)
+    return 0
+
+
+def _redact_value(value: Any) -> Any:
+    from zymor.security import redact
+
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    return value
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     config, vault = _context(args)
     settings = RetrievalSettings.from_config(config)
@@ -437,7 +586,9 @@ def cmd_search(args: argparse.Namespace) -> int:
         ]
         for warning in hybrid_result["warnings"]:
             lines.append(f"提示: {warning}")
-        _emit(args, hits, "\n".join(lines) if lines else "无结果")
+        payload = _redact_value(hits)
+        human = "\n".join(lines) if lines else "无结果"
+        _emit(args, payload, _redact_value(human))
         return 0
     result = memory_search(
         _scopes(config, vault),
@@ -446,7 +597,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         filters=filters,
         top_k=top_k,
     )
-    payload = [asdict(hit) for hit in result.hits]
+    payload = _redact_value([asdict(hit) for hit in result.hits])
     lines = [
         f"{position}. {hit.title} [{hit.id}] "
         f"{hit.layer}/{hit.category} {hit.status} "
@@ -456,7 +607,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     for warning in result.warnings:
         lines.append(f"提示: {warning}")
     human = "\n".join(lines) if lines else "无结果"
-    _emit(args, payload, human)
+    _emit(args, payload, _redact_value(human))
     return 0
 
 
@@ -491,7 +642,7 @@ def cmd_read(args: argparse.Namespace) -> int:
         )
     else:
         human = node.to_markdown()
-    _emit(args, payload, human)
+    _emit(args, _redact_value(payload), _redact_value(human))
     return 0
 
 
@@ -564,10 +715,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         )
     index = Index(vault.root)
     try:
-        if index._needs_rebuild():
-            add("warning", "index", "索引缺失或版本不符", "运行 `zymor index rebuild`")
-        else:
-            index.ensure()
+        needs_rebuild = index._needs_rebuild()
+        index.ensure()
+        if needs_rebuild:
+            add("warning", "index", "索引缺失或版本不符，已重建", "检查索引统计是否符合预期")
     except ZymorError as error:
         add("error", "index", error.message, "运行 `zymor index rebuild`")
     dirty = index.dirty_reason()
@@ -588,8 +739,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     f"{vault.relative(path)}: {error.message}",
                     "修正 frontmatter 或正文后重建索引",
                 )
-        except OSError as error:
-            add("error", "node", f"{vault.relative(path)}: 不可读: {error}", "检查文件权限")
+        except (OSError, UnicodeError) as error:
+            add("error", "node", f"{vault.relative(path)}: 不可读: {error}", "检查文件权限与编码")
     try:
         with index.connect() as connection:
             known = {row["id"] for row in connection.execute("SELECT id FROM nodes")}
@@ -649,6 +800,16 @@ def cmd_stats(args: argparse.Namespace) -> int:
     actions = ", ".join(f"{key}={value}" for key, value in extras["write_actions"].items())
     lines.append(f"写入动作: {actions or '无'}")
     lines.append(f"L0 事件: {extras['l0_events']}")
+    lines.append(
+        f"dream: runs={extras['dream_runs']} failures={extras['dream_failures']} "
+        f"last={extras['last_dream_at'] or '无'}"
+    )
+    lines.append(
+        f"规则检查: checks={extras['rule_checks']} failures={extras['rule_check_failures']} "
+        f"last={extras['last_rule_check_at'] or '无'}"
+    )
+    lines.append(f"检索: records={extras['retrievals']} reads={extras['retrieval_reads']}")
+    lines.append(f"stale 节点: {extras['stale_nodes']}")
     _emit(args, payload, "\n".join(lines))
     return 0
 
@@ -865,8 +1026,75 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dream_lines(report: Any) -> str:
+    if report.dry_run:
+        lines = [f"dry-run {report.run_id}（不写文件、不调 LLM）"]
+        lines.extend(f"- {step}" for step in report.plan.steps)
+        lines.append(f"预计 LLM 调用: {report.plan.estimated_llm_calls}")
+        return "\n".join(lines)
+    lines = [f"run {report.run_id} ok={report.ok}"]
+    for phase in report.phases:
+        lines.append(
+            f"- {phase.phase}: events={phase.processed_events} "
+            f"candidates={phase.candidates} created={phase.nodes_created} "
+            f"updated={phase.nodes_updated} errors={len(phase.errors)}"
+        )
+    budget = report.budget
+    lines.append(
+        f"budget: llm={budget['llm_calls']}/{budget['max_llm_calls']} "
+        f"usd={float(budget['usd']):.3f}/{float(budget['max_usd']):.2f} "
+        f"nodes={budget['nodes_changed']}/{budget['max_nodes_changed']}"
+    )
+    for warning in report.warnings:
+        lines.append(f"提示: {warning}")
+    for error in report.errors:
+        lines.append(f"错误: {error}")
+    return "\n".join(lines)
+
+
+def cmd_panel(args: argparse.Namespace) -> int:
+    from zymor.panel import run_panel
+
+    config, vault = _context(args)
+    run_panel(vault, config, host=args.host, port=args.port)
+    return 0
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    from zymor.harness import LocalHarness
+
+    config, vault = _context(args)
+    if args.hook_command == "context":
+        result = LocalHarness().session_start(
+            vault,
+            config,
+            task=args.task,
+            project=args.project,
+            budget_tokens=args.budget_tokens,
+            session_id=args.session_id,
+        )
+        _emit(args, result, result["text"])
+        return 0
+    raise UsageError(f"未知 hook 命令: {args.hook_command}")
+
+
 def cmd_dream(args: argparse.Namespace) -> int:
     config, vault = _context(args)
+    if args.history is not None:
+        from zymor.dream.state import list_run_records
+
+        records = list_run_records(vault, limit=args.history)
+        payload = {"count": len(records), "runs": records}
+        if records:
+            human = "\n".join(
+                f"- {item['run_id']} ok={item['ok']} status={item['status']} "
+                f"finished={item['finished_at']} phases={','.join(item['phases'])}"
+                for item in records
+            )
+        else:
+            human = "没有 dream run 记录"
+        _emit(args, payload, human)
+        return 0
     phases: tuple[str, ...]
     if args.phase == "all":
         all_phases = ["nrem", "arbitration"]
@@ -875,6 +1103,22 @@ def cmd_dream(args: argparse.Namespace) -> int:
         phases = tuple(all_phases)
     else:
         phases = (str(args.phase),)
+    if args.watch:
+        if args.dry_run:
+            raise UsageError("--watch 不能与 --dry-run 同时使用")
+        try:
+            while True:
+                report = run_dream(
+                    vault,
+                    config,
+                    phases=phases,
+                    dry_run=False,
+                    budget_usd=args.budget_usd,
+                )
+                _emit(args, report.to_dict(), _dream_lines(report))
+                time.sleep(max(1.0, args.interval))
+        except KeyboardInterrupt:
+            return 0
     report = run_dream(
         vault,
         config,
@@ -882,30 +1126,7 @@ def cmd_dream(args: argparse.Namespace) -> int:
         dry_run=bool(args.dry_run),
         budget_usd=args.budget_usd,
     )
-    payload = report.to_dict()
-    if report.dry_run:
-        lines = [f"dry-run {report.run_id}（不写文件、不调 LLM）"]
-        lines.extend(f"- {step}" for step in report.plan.steps)
-        lines.append(f"预计 LLM 调用: {report.plan.estimated_llm_calls}")
-    else:
-        lines = [f"run {report.run_id} ok={report.ok}"]
-        for phase in report.phases:
-            lines.append(
-                f"- {phase.phase}: events={phase.processed_events} "
-                f"candidates={phase.candidates} created={phase.nodes_created} "
-                f"updated={phase.nodes_updated} errors={len(phase.errors)}"
-            )
-        budget = report.budget
-        lines.append(
-            f"budget: llm={budget['llm_calls']}/{budget['max_llm_calls']} "
-            f"usd={float(budget['usd']):.3f}/{float(budget['max_usd']):.2f} "
-            f"nodes={budget['nodes_changed']}/{budget['max_nodes_changed']}"
-        )
-        for warning in report.warnings:
-            lines.append(f"提示: {warning}")
-        for error in report.errors:
-            lines.append(f"错误: {error}")
-    _emit(args, payload, "\n".join(lines))
+    _emit(args, report.to_dict(), _dream_lines(report))
     return 0 if report.dry_run or report.ok else 1
 
 
@@ -994,7 +1215,6 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
-
 def _dispatch(args: argparse.Namespace) -> int:
     command = args.command
     if command == "index":
@@ -1003,12 +1223,15 @@ def _dispatch(args: argparse.Namespace) -> int:
         "init": cmd_init,
         "write": cmd_write,
         "remember": cmd_remember,
+        "export": cmd_export,
+        "import": cmd_import,
         "search": cmd_search,
         "semantic": cmd_semantic,
         "rules": cmd_rules,
         "rule-check": cmd_rule_check,
         "read": cmd_read,
         "log": cmd_log,
+        "capture": cmd_capture,
         "doctor": cmd_doctor,
         "stats": cmd_stats,
         "focus": cmd_focus,
@@ -1020,6 +1243,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         "forget": cmd_forget,
         "answer": cmd_answer,
         "dream": cmd_dream,
+        "hook": cmd_hook,
+        "panel": cmd_panel,
         "mcp": cmd_mcp,
     }
     handler = handlers.get(command)
@@ -1044,6 +1269,23 @@ def main(argv: list[str] | None = None) -> int:
         return error.exit_code
     except BrokenPipeError:
         return 1
+    except UnicodeError as error:
+        if _flag(args, "json_output"):
+            print(
+                json.dumps(
+                    {"error": "invalid_input", "message": str(error), "hint": "使用 UTF-8 文本"},
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"错误: {error}", file=sys.stderr)
+        return 4
+    except OSError as error:
+        print(f"错误: {error}", file=sys.stderr)
+        return 1
+    except ValueError as error:
+        print(f"错误: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

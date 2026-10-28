@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
-[![Version](https://img.shields.io/badge/Version-v0.2.1-brightgreen)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v0.5.0-brightgreen)](CHANGELOG.md)
 [![PyPI](https://img.shields.io/pypi/v/zymor)](https://pypi.org/project/zymor/)
 [![CI](https://github.com/Gyanano/zymor/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyanano/zymor/actions/workflows/ci.yml)
 ![Storage](https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-4b8bbe)
@@ -22,12 +22,15 @@
 
 ## Status
 
-**v0.1.0 — memory kernel complete.** The current implementation covers:
+**v0.5.0 — memory kernel, Memory Loop, Interop and Agent Experience are complete.** The current implementation covers:
 
 - **Memory kernel**: L0 event stream, L1 focus, L2 capsules, L3 knowledge nodes, L4 persona facets;
 - **Retrieval and context**: FTS5 with identifier subtokens, scoring/filtering, progressive disclosure, ATLAS/catalog;
 - **Write protocol**: gate, dedupe, state machine, audit, privacy deletion;
 - **Dream engine**: NREM consolidation, dissonance arbitration, REM association, persona distillation;
+- **Memory Loop**: rule-check/repair loop, file capture, dream history and `--watch`, stats health metrics;
+- **Interop**: bundle export/import, `MemoryAdapter` contract, portable node format;
+- **Agent Experience**: Harness Hook/Skill contract, local read-only panel;
 - **MCP server**: stdio / Streamable HTTP, read-write and read-only modes;
 - **Long-term memory**: cross-project L3 promotion, `projects` provenance, file/dependency/API-version anchors, stale exclusion, optional embedding semantic search and hybrid retrieval, `memory_rules` and `memory_rule_check`.
 
@@ -87,17 +90,21 @@ Host agent / MCP client
 | `zymor init [--global]` | initialize the project/user vault |
 | `zymor write --file PATH \| --stdin` | write a full Markdown node |
 | `zymor remember TEXT [--category ...]` | quick capture through the write protocol |
+| `zymor export DIR / import DIR` | export/import a validated node bundle |
 | `zymor search QUERY [--semantic]` | retrieval (optional hybrid semantic) |
 | `zymor semantic QUERY` | embedding-based semantic search |
 | `zymor read ID` | read a node |
 | `zymor log --kind KIND --content TEXT` | append an L0 event |
+| `zymor capture --path . [--once]` | poll file changes and append to L0 |
 | `zymor focus --session ID` | view/update the L1 focus file |
 | `zymor index sync\|rebuild\|catalog\|embed` | index, catalog, and vector maintenance |
 | `zymor rules / rule-check` | load/execute verified project rules |
 | `zymor review / answer` | human review and morning questions |
 | `zymor promote / adopt / anchor / stale` | cross-project promotion, adoption, staleness anchors |
-| `zymor dream [--phase ...]` | run the dream engine |
+| `zymor dream [--phase ...]` | run the dream engine (`--history N` / `--watch`) |
 | `zymor mcp` | start the MCP server |
+| `zymor hook context` | emit session-start context for a harness |
+| `zymor panel` | start the local read-only memory panel |
 | `zymor doctor / stats` | self-check and statistics |
 
 ## MCP integration
@@ -115,7 +122,7 @@ Claude Code:
 claude mcp add zymor -- uv run --directory <ZYMOR_REPO> zymor mcp
 ```
 
-Full DSH / Cursor configuration and acceptance steps: [`docs/guide/mcp-integration.md`](docs/guide/mcp-integration.md).
+Full DSH / Claude Code configuration and acceptance steps: [`docs/guide/mcp-integration.md`](docs/guide/mcp-integration.md).
 
 MCP tools: `memory_context`, `memory_rules`, `memory_rule_check`, `memory_search`, `memory_semantic_search`, `memory_read`, `memory_browse`, `memory_links`, `memory_write`, `memory_focus`, `memory_close`, `memory_log`, `memory_answer`, `memory_dream`, `memory_promote`, `memory_adopt`, `memory_stale`.
 
@@ -133,6 +140,11 @@ uv run pytest tests/test_open_smoke.py -q
 | Path | Contents |
 | --- | --- |
 | `docs/guide/` | Quick start, dreaming, MCP integration, rule checks, troubleshooting |
+| `docs/guide/migration.md` | Export/import and the MemoryAdapter interface |
+| `docs/guide/harness-hooks.md` | Harness Hook/Skill contract and integration |
+| `integrations/` | Claude Code / Codex reference integrations |
+| `docs/guide/panel.md` | Local read-only memory panel |
+| `docs/guide/validation.md` | Community validation and issue reporting |
 | `docs/development/repository-workflow.md` | Development, review, release, branch-protection, and collaboration workflow |
 | `docs/development/release.md` | Versioning, PyPI Trusted Publishing, and tag workflow |
 | `CONTRIBUTING.md` | Contribution guide |

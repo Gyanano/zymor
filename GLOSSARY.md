@@ -5,7 +5,7 @@
 | 术语 | 定义 |
 | --- | --- |
 | Zymor | 本项目：与宿主无关的 Agent 记忆系统，由分层记忆、做梦引擎与可移植知识库组成。中文对外名「织梦师」。 |
-| 宿主 / Harness | 运行 Agent 的框架或应用（DSH、Claude Code、Cursor、Codex 等）；Zymor 通过 MCP 与它们解耦。 |
+| 宿主 / Harness | 运行 Agent 的框架或应用（DSH、Claude Code、Codex 等）；Zymor 通过 MCP 与它们解耦。 |
 | 事件（Event） | L0 感知流中的一条原始记录（用户消息、助手消息、工具调用或结果），append-only，不进入上下文。 |
 | 焦点文件（Focus File） | 每个会话一个的 L1 工作记忆文件，包含当前目标、活跃假设、已排除路径等，是唯一全量挂载层。 |
 | 胶囊（Capsule） | L2 层的情景记忆节点，承载跨天/周任务的状态；平时只暴露一句话摘要。 |

@@ -29,6 +29,7 @@ from zymor.model.node import (
     TOMBSTONE_H2,
     MemoryNode,
 )
+from zymor.security import detect_sensitive
 from zymor.store.audit import append_audit
 from zymor.store.index import Index
 from zymor.store.nodes import read_node, update_node, write_node
@@ -151,6 +152,14 @@ def memory_write(
     confidence: float | None = None,
 ) -> WriteOutcome:
     """入参：vault、配置与 §4.2 写入参数。出参：写入结果。执行门控、去重四选一、校验与原子落盘。"""
+    combined = "\n".join([title, summary, body, *(evidence or [])])
+    labels = detect_sensitive(combined)
+    if labels:
+        raise ValidationError(
+            "检测到敏感信息，拒绝写入",
+            field="body",
+            hint=f"命中类别: {', '.join(sorted(set(labels)))}；请先移除密钥/口令",
+        )
     started = time.monotonic()
     state = _WriteState()
     try:

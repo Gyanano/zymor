@@ -7,6 +7,7 @@ from typing import Any
 
 from zymor.errors import IndexFailure, NotFoundError, ValidationError
 from zymor.model.node import MemoryNode
+from zymor.security import detect_sensitive
 from zymor.store.audit import append_audit
 from zymor.store.index import Index
 from zymor.util.fs import atomic_write_text, sha256_hex
@@ -115,6 +116,14 @@ def _persist(
 def write_node(vault: Vault, node: MemoryNode, command: str = "write") -> WriteResult:
     """入参：vault、校验通过的节点、命令名。出参：写入结果。持锁执行原子写与增量索引。"""
     check_layer_vault(node, vault)
+    combined = "\n".join([node.title, node.summary, node.body, *node.evidence])
+    labels = detect_sensitive(combined)
+    if labels:
+        raise ValidationError(
+            "检测到敏感信息，拒绝写入",
+            field="body",
+            hint=f"命中类别: {', '.join(sorted(set(labels)))}；请先移除密钥/口令",
+        )
     existing = vault.find_node_path(node.id)
     target = vault.node_path(node.category, node.id)
     if existing is not None and existing.resolve() != target.resolve():
@@ -157,5 +166,13 @@ def update_node(
         payload.update(updates)
         payload.setdefault("updated_at", now_iso())
         updated = MemoryNode.model_validate(payload)
+        combined = "\n".join([updated.title, updated.summary, updated.body, *updated.evidence])
+        labels = detect_sensitive(combined)
+        if labels:
+            raise ValidationError(
+                "检测到敏感信息，拒绝更新",
+                field="body",
+                hint=f"命中类别: {', '.join(sorted(set(labels)))}；请先移除密钥/口令",
+            )
         _persist(vault, updated, command, created=False, old_hash=old_hash)
     return updated

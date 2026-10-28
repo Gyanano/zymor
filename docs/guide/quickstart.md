@@ -66,12 +66,25 @@ arbitration = "gpt-4o"
 
 密钥只放环境变量（`api_key_env` 指向变量名），不要写进配置文件。未配置 LLM 时 `dream` 会给出 warning 并保持水位线不推进，不会伪造巩固结果。
 
+## 文件捕获（可选）
+
+```bash
+uv run zymor capture --path . --once --session capture-demo
+uv run zymor capture --path . --interval 5 --session capture-daemon
+```
+
+- 默认忽略 `.git`、`.zymor`、`.venv`、`node_modules`、缓存目录；
+- 文件创建/修改/删除写入 L0 `system_note`，`meta.source=capture`；
+- 不带 `--once` 时作为可选后台轮询运行；默认不启动任何 daemon；
+- 只监听显式指定的项目内目录，不监听用户库；
+- 快照与待处理队列保存在 `<vault>/capture/state.json`，已被 vault `.gitignore` 忽略。
+
 ## 维护
 
 ```bash
 uv run zymor review            # 列出 hypothesis/disputed 节点
 uv run zymor answer Q1 --text "采纳新节点"   # 回答晨间追问
-uv run zymor stats             # 节点/层/状态计数、写入动作、L0 事件数
+uv run zymor stats             # 节点/层/状态计数、写入动作、L0/dream/rules/检索指标
 uv run zymor index sync        # 外部改动后增量同步索引
 uv run zymor forget <id> --yes # 隐私删除（不可恢复）
 ```

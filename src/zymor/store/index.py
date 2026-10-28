@@ -138,10 +138,16 @@ class Index:
             raise IndexFailure(f"无法打开索引数据库: {error}") from error
         connection.row_factory = sqlite3.Row
         try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=NORMAL")
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.Error as error:
+                raise IndexFailure(f"索引数据库不可用: {error}") from error
             yield connection
-            connection.commit()
+            try:
+                connection.commit()
+            except sqlite3.Error as error:
+                raise IndexFailure(f"索引提交失败: {error}") from error
         finally:
             connection.close()
 
@@ -178,12 +184,14 @@ class Index:
         )
 
     def ensure(self) -> None:
-        """入参：无。出参：无。确保索引可用；缺失或版本不符时自动重建。"""
+        """入参：无。出参：无。确保索引可用；缺失自动重建，dirty 自动同步。"""
         if self._needs_rebuild():
             self.rebuild()
-        else:
-            with self.connect() as connection:
-                self._create_schema(connection)
+            return
+        with self.connect() as connection:
+            self._create_schema(connection)
+        if self.dirty_reason() is not None:
+            self.sync(ensure_index=False)
 
     def _iter_node_files(self) -> Iterator[Path]:
         if not self.nodes_dir.is_dir():
@@ -285,7 +293,7 @@ class Index:
         try:
             text = path.read_text(encoding="utf-8")
             return MemoryNode.from_markdown(text)
-        except (OSError, ValidationError) as error:
+        except (OSError, UnicodeError, ValidationError) as error:
             message = error.message if isinstance(error, ValidationError) else str(error)
             report.invalid.append(
                 {"path": path.relative_to(self.root).as_posix(), "error": message}
@@ -325,10 +333,11 @@ class Index:
         self.clear_dirty()
         return report
 
-    def sync(self) -> SyncReport:
-        """入参：无。出参：增量同步报告。按 mtime 与 content_hash 更新文件变化。"""
+    def sync(self, *, ensure_index: bool = True) -> SyncReport:
+        """入参：可选是否先确保索引。出参：增量同步报告。按 mtime 与 content_hash 更新文件变化。"""
         report = SyncReport()
-        self.ensure()
+        if ensure_index:
+            self.ensure()
         try:
             with self.connect() as connection:
                 existing = {
@@ -342,7 +351,7 @@ class Index:
                     try:
                         text = path.read_text(encoding="utf-8")
                         node = MemoryNode.from_markdown(text)
-                    except (OSError, ValidationError) as error:
+                    except (OSError, UnicodeError, ValidationError) as error:
                         message = (
                             error.message if isinstance(error, ValidationError) else str(error)
                         )
@@ -360,6 +369,7 @@ class Index:
                         report.deleted += 1
         except sqlite3.Error as error:
             raise IndexFailure(f"索引同步失败: {error}") from error
+        self.clear_dirty()
         return report
 
     def search(

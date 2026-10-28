@@ -2,6 +2,33 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
+## [0.5.0] - 2026-10-29
+
+### Added
+
+- 规则执行/修复闭环：`memory_rule_check` 支持 content/attempt/repair instructions、`rules.jsonl` 审计。
+- 文件捕获：`zymor capture`，持久化快照与待处理队列，默认只监听项目库。
+- Bundle 导出/导入、`MemoryAdapter` 契约、Harness Hooks、本地只读面板。
+- 自定义 `--vault` 在 `vault.json` 记录 `project_root`。
+
+### Fixed
+
+- L0 seq 改为会话级跨日期单调，cleanup 保留未消费事件。
+- `export` 跳过 `_catalog.md` 等生成物；import 先校验再写入。
+- 全新 vault 的 `zymor doctor` 自动初始化索引。
+- rule-check 未匹配文件改为 skip，CLI 路径与 MCP/harness 一致。
+- stats 恢复 conflict/supersede/gate/degraded 动作计数。
+- 敏感信息检测下沉到 `write_node`，CLI search/read 输出脱敏。
+- capture 跨重启保留快照与待处理事件，拒绝监听用户库。
+- panel 搜索不再写检索审计；端口/参数错误返回可操作错误。
+- 只读 MCP `memory_read` 不再递增 hit_count 或写检索审计。
+- 只读 MCP `memory_search` 不再写检索审计；`update_node` 也执行敏感检测。
+- vault 记录项目根的绝对与相对位置，目录迁移后仍能解析；子目录 init 记录真实项目根。
+- rules 审计补 `skipped_checks` / `unmatched`；capture 状态目录加入 vault `.gitignore`。
+- dream/写入锁增加初始化宽限与 stale 恢复；run 记录 `phases` 改为实际执行阶段。
+- stats 的 dream 失败数与最近时间按状态/时区正确计算。
+- `ruff format --check` 恢复通过。
+
 ## [0.2.1] - 2026-10-28
 
 ### Fixed

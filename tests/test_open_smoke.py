@@ -5,9 +5,14 @@ from pathlib import Path
 import pytest
 
 from zymor.assembly import memory_context
+from zymor.bundle import export_bundle, import_bundle
+from zymor.capture import FileChange, capture_changes
 from zymor.config import Config
+from zymor.harness import LocalHarness
 from zymor.invalidation import file_anchor
+from zymor.model.event import read_events
 from zymor.model.node import MemoryNode, new_node
+from zymor.panel import overview_payload, search_payload
 from zymor.promotion import adopt_global, promote_to_global
 from zymor.retrieval import (
     RetrievalSettings,
@@ -121,3 +126,56 @@ def test_cross_project_promotion(vaults: tuple[Vault, Vault]) -> None:
     adopted = adopt_global(global_vault, "second-project", promoted.global_id)
     assert adopted.projects == ["demo", "second-project"]
     assert "cross-project-verified" in adopted.tags
+
+
+def test_bundle_roundtrip(vaults: tuple[Vault, Vault], tmp_path: Path) -> None:
+    project, _ = vaults
+    node = _node("可迁移结论")
+    write_node(project, node)
+    bundle = tmp_path / "bundle"
+    exported = export_bundle(project, bundle)
+    assert exported["node_count"] == 1
+    target = Vault.init(tmp_path / "target" / ".zymor" / "vault", "project", "target")
+    imported = import_bundle(target, bundle)
+    assert imported["imported"] == 1
+    restored, _ = read_node(target, node.id)
+    assert restored.title == "可迁移结论"
+
+
+def test_capture_panel_and_harness(vaults: tuple[Vault, Vault], tmp_path: Path) -> None:
+    project, _ = vaults
+    captured = capture_changes(
+        project,
+        [FileChange("create", "smoke.py")],
+        session_id="smoke-capture",
+    )
+    assert captured["captured"] == 1
+    events = [event for event in read_events(project.l0_dir) if event.session_id == "smoke-capture"]
+    assert events[0].meta["source"] == "capture"
+    node = _node("面板检索", summary="面板基础检索。")
+    write_node(project, node)
+    config = Config()
+    config.data["vault"]["global_path"] = str(tmp_path / "missing-global")
+    overview = overview_payload(project)
+    assert overview["counts"]["total"] == 1
+    hits = search_payload(project, config, "面板")
+    assert hits and hits[0]["id"] == node.id
+    rule = _node(
+        "Harness 配置规则",
+        status="verified",
+        applies_to=["coding"],
+        evidence=["review:smoke"],
+        body=_body(
+            "Harness 配置规则",
+            "\n## 检查\nconfig.py | contains | timeout_ms = 30000\n",
+        ),
+    )
+    write_node(project, rule)
+    report = LocalHarness().generation(
+        project,
+        content={"config.py": "timeout_ms = 1\n"},
+        task_type="coding",
+        config=config,
+    )
+    assert report["next_action"] == "repair"
+    assert report["checked_rules"] == 1
