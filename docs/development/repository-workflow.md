@@ -90,6 +90,7 @@ GitHub 仓库已启用规则集 `Protect main`（默认分支）：
   5. 创建 GitHub Release，正文来自 changelog；
   6. 需要时发布 PyPI（当前尚未接入）。
 - 发布分支：仅在需要维护旧版本时创建 `release/x.y`；早期项目直接从 `main` 发布。
+- 发布自动化与 PyPI Trusted Publishing 见 [`release.md`](release.md)。
 
 ## 7. 安全与依赖
 
@@ -126,5 +127,10 @@ GitHub 仓库已启用规则集 `Protect main`（默认分支）：
 - [x] Private vulnerability reporting
 - [x] Dependabot alerts / security updates
 - [x] CodeQL default setup
+- [x] `.github/dependabot.yml`（uv + GitHub Actions 每周更新）
+- [x] `.github/workflows/release.yml`（tag 触发构建 + PyPI OIDC 发布）
+- [ ] PyPI pending publisher / 首次发布（需要 PyPI 账号配置）
+- [ ] tag ruleset（保护 `v*`）
+- [ ] CodeQL merge gate（等首次扫描结果后开启）
 - [x] `CHANGELOG.md`
 - [ ] PyPI 发布（尚未接入）

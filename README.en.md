@@ -127,6 +127,7 @@ uv run pytest tests/test_open_smoke.py -q
 | --- | --- |
 | `docs/guide/` | Quick start, dreaming, MCP integration, rule checks, troubleshooting |
 | `docs/development/repository-workflow.md` | Development, review, release, branch-protection, and collaboration workflow |
+| `docs/development/release.md` | Versioning, PyPI Trusted Publishing, and tag workflow |
 | `CONTRIBUTING.md` | Contribution guide |
 | `SECURITY.md` | Security reporting and boundaries |
 | `CODE_OF_CONDUCT.md` | Code of conduct |
