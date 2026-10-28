@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
+## [0.2.1] - 2026-10-28
+
+### Fixed
+
+- `zymor --version` 现在从安装包元数据读取版本；0.2.0 wheel 中该值仍是旧的 0.1.0。
+
 ## [0.2.0] - 2026-10-28
 
 ### Added
@@ -36,3 +42,4 @@
 
 [0.1.0]: https://github.com/Gyanano/zymor/releases/tag/v0.1.0
 [0.2.0]: https://github.com/Gyanano/zymor/releases/tag/v0.2.0
+[0.2.1]: https://github.com/Gyanano/zymor/releases/tag/v0.2.1

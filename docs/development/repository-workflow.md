@@ -97,7 +97,7 @@ GitHub 仓库已启用规则集 `Protect main`（默认分支）：
   3. 跑 smoke 测试与静态检查；
   4. 打 tag `vX.Y.Z`；
   5. 创建 GitHub Release，正文来自 changelog；
-  6. 需要时发布 PyPI（当前尚未接入）。
+  6. 发布 PyPI：首次 0.2.0 已通过 Trusted Publishing 发布；后续由 tag 自动发布。
 - 发布分支：仅在需要维护旧版本时创建 `release/x.y`；早期项目直接从 `main` 发布。
 - 发布自动化与 PyPI Trusted Publishing 见 [`release.md`](release.md)。
 
@@ -141,6 +141,5 @@ GitHub 仓库已启用规则集 `Protect main`（默认分支）：
 - [x] tag ruleset `Protect release tags`（`v*`）
 - [x] CodeQL merge gate（CodeQL / High+ / Errors）
 - [x] GitHub environment `pypi` + required reviewer
-- [ ] PyPI pending publisher / 首次发布（需要 PyPI 账号配置）
+- [x] PyPI Trusted Publisher / 首次发布（0.2.0）
 - [x] `CHANGELOG.md`
-- [ ] PyPI 发布（尚未接入）

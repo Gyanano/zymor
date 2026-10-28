@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
-[![Version](https://img.shields.io/badge/Version-v0.2.0-brightgreen)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v0.2.1-brightgreen)](CHANGELOG.md)
 [![PyPI](https://img.shields.io/pypi/v/zymor)](https://pypi.org/project/zymor/)
 [![CI](https://github.com/Gyanano/zymor/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyanano/zymor/actions/workflows/ci.yml)
 ![Storage](https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-4b8bbe)
