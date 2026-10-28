@@ -57,18 +57,27 @@ PR 必须包含：
 - 合并策略：**squash merge**，删除分支；
 - 评审开始后不要强推分支，除非维护者要求。
 
-## 5. main 分支保护（仓库设置清单）
+## 5. main 分支保护（当前设置）
 
-建议在 GitHub Settings 中开启：
+GitHub 仓库已启用规则集 `Protect main`（默认分支）：
 
 - [x] Require a pull request before merging；
-- [x] Require status checks：CI（ruff / mypy / smoke quick test）；
-- [x] Require branches to be up to date before merging；
-- [x] Do not allow bypassing the above settings（维护者紧急修复除外，需事后说明）；
-- [x] Secret scanning / push protection（公开仓库）；
+- [x] Require status checks：`ruff + mypy + smoke (Python 3.12)`、`ruff + mypy + smoke (Python 3.13)`；
+- [x] Block force pushes；
+- [x] Restrict deletions；
+- [x] Bypass list 为空；
+- [ ] Require branches to be up to date before merging（可选，当前未启用）；
+- [ ] Require signed commits（可选，当前未启用）。
+
+单人维护阶段 Required approvals 为 `0`，允许维护者自己合并；引入第二名常驻维护者后改为 `1`，并启用 up-to-date 与第二人 review。
+
+安全与依赖设置（Advanced Security）：
+
+- [x] Secret scanning + push protection；
 - [x] Private vulnerability reporting；
-- [x] Dependabot alerts；
-- [x] Delete head branches after merge。
+- [x] Dependabot alerts + malware alerts + security updates；
+- [x] CodeQL default setup（GitHub Actions + Python）；
+- [x] Dependabot auto-triage 默认规则。
 
 ## 6. 版本与发布
 
@@ -112,7 +121,10 @@ PR 必须包含：
 - [x] `.github/ISSUE_TEMPLATE/`（bug / feature / config）
 - [x] `.github/PULL_REQUEST_TEMPLATE.md`
 - [x] `.github/workflows/ci.yml`（ruff + mypy + smoke）
+- [x] GitHub ruleset `Protect main`（PR + 状态检查 + 禁止强推/删除）
+- [x] Secret scanning / push protection
+- [x] Private vulnerability reporting
+- [x] Dependabot alerts / security updates
+- [x] CodeQL default setup
 - [x] `CHANGELOG.md`
-- [ ] 分支保护（需在 GitHub Settings 手动开启）
-- [ ] Dependabot / secret scanning（需在 GitHub Settings 手动开启）
 - [ ] PyPI 发布（尚未接入）
