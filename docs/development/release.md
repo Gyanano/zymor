@@ -6,6 +6,8 @@
 
 ### 1.1 GitHub environment
 
+仓库已创建环境 `pypi`（当前无 required reviewers，可在发布前添加）。如需重建：
+
 在 GitHub 仓库 **Settings → Environments** 新建环境：
 
 - 名称：`pypi`
