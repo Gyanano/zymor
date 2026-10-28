@@ -111,6 +111,15 @@ Full DSH / Cursor configuration and acceptance steps: [`docs/guide/mcp-integrati
 
 MCP tools: `memory_context`, `memory_rules`, `memory_rule_check`, `memory_search`, `memory_semantic_search`, `memory_read`, `memory_browse`, `memory_links`, `memory_write`, `memory_focus`, `memory_close`, `memory_log`, `memory_answer`, `memory_dream`, `memory_promote`, `memory_adopt`, `memory_stale`.
 
+## Testing
+
+The minimal smoke suite checks basic functionality only (write/search/read/context/stale anchors/rule checks/cross-project promotion), not quality or effectiveness:
+
+```bash
+uv sync --extra dev
+uv run pytest tests/test_open_smoke.py -q
+```
+
 ## Documentation
 
 | Path | Contents |

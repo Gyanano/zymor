@@ -111,6 +111,15 @@ DSH / Cursor 的完整配置与验收步骤见 [`docs/guide/mcp-integration.md`]
 
 MCP 工具：`memory_context`、`memory_rules`、`memory_rule_check`、`memory_search`、`memory_semantic_search`、`memory_read`、`memory_browse`、`memory_links`、`memory_write`、`memory_focus`、`memory_close`、`memory_log`、`memory_answer`、`memory_dream`、`memory_promote`、`memory_adopt`、`memory_stale`。
 
+## 测试
+
+最小冒烟测试只验证基础功能可用（写入/检索/读取/上下文/失效锚点/规则检查/跨项目晋升），不验证效果：
+
+```bash
+uv sync --extra dev
+uv run pytest tests/test_open_smoke.py -q
+```
+
 ## 文档
 
 | 路径 | 内容 |
