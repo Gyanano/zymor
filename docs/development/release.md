@@ -14,9 +14,11 @@
 - 可添加 required reviewers（推荐，发布前人工确认）
 - 不需要保存任何 PyPI secret
 
-### 1.2 PyPI pending trusted publisher
+### 1.2 PyPI trusted publisher
 
-首次发布前，在 PyPI 账号的 [Publishing](https://pypi.org/manage/account/publishing/) 页面创建 pending publisher：
+`zymor` 的 pending publisher 已配置，0.2.0 首次发布成功后已转为正式 publisher；后续无需 token。
+
+如需为新包或恢复后重建，在 PyPI 账号的 [Publishing](https://pypi.org/manage/account/publishing/) 页面创建 pending publisher：
 
 | 字段 | 值 |
 | --- | --- |
