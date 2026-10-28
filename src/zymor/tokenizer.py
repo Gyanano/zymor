@@ -23,11 +23,42 @@ def identifier_parts(term: str) -> list[str]:
     for chunk in chunks:
         if not chunk.isalpha():
             continue
-        for part in re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+", chunk):
+        for part in _camel_parts(chunk):
             lowered = part.lower()
             if len(lowered) >= 2 and lowered not in parts:
                 parts.append(lowered)
     return parts if len(parts) > 1 else []
+
+
+def _camel_parts(chunk: str) -> list[str]:
+    """入参：字母串。出参：camelCase 拆分结果。手工扫描避免多项式回溯正则。"""
+    parts: list[str] = []
+    index = 0
+    size = len(chunk)
+    while index < size:
+        if chunk[index].isupper():
+            end = index
+            while end < size and chunk[end].isupper():
+                end += 1
+            if end - index > 1 and end < size and chunk[end].islower():
+                parts.append(chunk[index : end - 1])
+                index = end - 1
+                continue
+            if end - index == 1 and end < size and chunk[end].islower():
+                while end < size and chunk[end].islower():
+                    end += 1
+                parts.append(chunk[index:end])
+                index = end
+                continue
+            parts.append(chunk[index:end])
+            index = end
+            continue
+        end = index
+        while end < size and chunk[end].islower():
+            end += 1
+        parts.append(chunk[index:end])
+        index = end
+    return parts
 
 
 def _is_cjk(char: str) -> bool:
