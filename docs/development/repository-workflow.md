@@ -63,6 +63,7 @@ GitHub 仓库已启用规则集 `Protect main`（默认分支）：
 
 - [x] Require a pull request before merging；
 - [x] Require status checks：`ruff + mypy + smoke (Python 3.12)`、`ruff + mypy + smoke (Python 3.13)`；
+- [x] Require code scanning results：CodeQL，Security alerts `High or higher`，Alerts `Errors`；
 - [x] Block force pushes；
 - [x] Restrict deletions；
 - [x] Bypass list 为空；
@@ -70,6 +71,13 @@ GitHub 仓库已启用规则集 `Protect main`（默认分支）：
 - [ ] Require signed commits（可选，当前未启用）。
 
 单人维护阶段 Required approvals 为 `0`，允许维护者自己合并；引入第二名常驻维护者后改为 `1`，并启用 up-to-date 与第二人 review。
+
+发布 tag 由独立规则集 `Protect release tags` 保护：
+
+- [x] Target：`v*`；
+- [x] Restrict updates（已发布 tag 不可移动）；
+- [x] Restrict deletions（已发布 tag 不可删除）；
+- [x] Bypass list 为空。
 
 安全与依赖设置（Advanced Security）：
 
@@ -129,8 +137,8 @@ GitHub 仓库已启用规则集 `Protect main`（默认分支）：
 - [x] CodeQL default setup
 - [x] `.github/dependabot.yml`（uv + GitHub Actions 每周更新）
 - [x] `.github/workflows/release.yml`（tag 触发构建 + PyPI OIDC 发布）
+- [x] tag ruleset `Protect release tags`（`v*`）
+- [x] CodeQL merge gate（CodeQL / High+ / Errors）
 - [ ] PyPI pending publisher / 首次发布（需要 PyPI 账号配置）
-- [ ] tag ruleset（保护 `v*`）
-- [ ] CodeQL merge gate（等首次扫描结果后开启）
 - [x] `CHANGELOG.md`
 - [ ] PyPI 发布（尚未接入）
