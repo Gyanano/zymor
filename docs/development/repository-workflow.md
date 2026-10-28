@@ -64,10 +64,11 @@ GitHub 仓库已启用规则集 `Protect main`（默认分支）：
 - [x] Require a pull request before merging；
 - [x] Require status checks：`ruff + mypy + smoke (Python 3.12)`、`ruff + mypy + smoke (Python 3.13)`；
 - [x] Require code scanning results：CodeQL，Security alerts `High or higher`，Alerts `Errors`；
+- [x] Require branches to be up to date before merging；
+- [x] Allowed merge methods：仅 Squash；
 - [x] Block force pushes；
 - [x] Restrict deletions；
 - [x] Bypass list 为空；
-- [ ] Require branches to be up to date before merging（可选，当前未启用）；
 - [ ] Require signed commits（可选，当前未启用）。
 
 单人维护阶段 Required approvals 为 `0`，允许维护者自己合并；引入第二名常驻维护者后改为 `1`，并启用 up-to-date 与第二人 review。
@@ -139,6 +140,7 @@ GitHub 仓库已启用规则集 `Protect main`（默认分支）：
 - [x] `.github/workflows/release.yml`（tag 触发构建 + PyPI OIDC 发布）
 - [x] tag ruleset `Protect release tags`（`v*`）
 - [x] CodeQL merge gate（CodeQL / High+ / Errors）
+- [x] GitHub environment `pypi` + required reviewer
 - [ ] PyPI pending publisher / 首次发布（需要 PyPI 账号配置）
 - [x] `CHANGELOG.md`
 - [ ] PyPI 发布（尚未接入）
