@@ -29,6 +29,8 @@ class DreamBudget:
     max_llm_calls: int = 100
     max_usd: float = 2.0
     max_nodes_changed: int = 200
+    max_tokens: int = 2_000_000
+    unpriced_calls: int = 0
     llm_calls: int = 0
     usd: float = 0.0
     tokens_in: int = 0
@@ -44,11 +46,16 @@ class DreamBudget:
             max_llm_calls=int(config.get("dream.budget.max_llm_calls")),
             max_usd=float(max_usd),
             max_nodes_changed=int(config.get("dream.budget.max_nodes_changed")),
+            max_tokens=int(config.get("dream.budget.max_tokens", 2_000_000)),
         )
 
     def can_call_llm(self) -> bool:
         """入参：无。出参：当前预算是否还允许一次 LLM 调用。"""
-        return self.llm_calls < self.max_llm_calls and self.usd < self.max_usd
+        return (
+            self.llm_calls < self.max_llm_calls
+            and self.usd < self.max_usd
+            and self.tokens_in + self.tokens_out < self.max_tokens
+        )
 
     def record_llm(self, response: LlmResponse | None) -> None:
         """入参：LLM 响应或 None。出参：无。累计调用次数、token 与费用。"""
@@ -56,6 +63,9 @@ class DreamBudget:
         if response is None:
             return
         self.usd += response.usd_estimate
+        if not response.priced:
+            # 模型没有配置单价时费用恒为 0，max_usd 不会触发；由 max_tokens 兜底。
+            self.unpriced_calls += 1
         self.tokens_in += response.tokens_in
         self.tokens_out += response.tokens_out
 
@@ -73,6 +83,8 @@ class DreamBudget:
             return f"LLM 调用达到上限 {self.max_llm_calls}"
         if self.usd >= self.max_usd:
             return f"费用达到上限 {self.max_usd} USD"
+        if self.tokens_in + self.tokens_out >= self.max_tokens:
+            return f"token 用量达到上限 {self.max_tokens}"
         if self.nodes_changed >= self.max_nodes_changed:
             return f"节点变更达到上限 {self.max_nodes_changed}"
         return None
@@ -83,6 +95,8 @@ class DreamBudget:
             "max_llm_calls": self.max_llm_calls,
             "max_usd": self.max_usd,
             "max_nodes_changed": self.max_nodes_changed,
+            "max_tokens": self.max_tokens,
+            "unpriced_calls": self.unpriced_calls,
             "llm_calls": self.llm_calls,
             "usd": round(self.usd, 6),
             "tokens_in": self.tokens_in,

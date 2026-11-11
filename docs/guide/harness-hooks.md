@@ -39,16 +39,17 @@ JSON 输出包含 `text`、`tokens_estimate`、`section_tokens`、`task_type`、
 通用接入步骤：
 
 1. SessionStart / 会话开始：调用 `zymor hook context --json`，把 `text` 加入上下文；
-2. 工具/错误/会话结束：调用 `zymor log` 或 `zymor capture` 写入 L0；
-3. 生成代码后：调用 `zymor rule-check --stdin --path <target> --json`（或 MCP `memory_rule_check`）；
-4. `next_action=repair` 时按 `repair_instructions` 修复，再以 `attempt+1` 重试；
-5. `next_action=stop` 时报告未修复项，不要静默通过。
+2. 用户每发一条消息：调用 `zymor hook recall`，把它输出的相关记忆加入上下文（没有相关记忆时输出为空）；
+3. 每轮回答结束、上下文压缩前、会话结束：调用 `zymor hook capture`，把新增对话写入 L0（见 [`capture.md`](capture.md)）；单条事件仍可用 `zymor log`；
+4. 生成代码后：调用 `zymor rule-check --stdin --path <target> --json`（或 MCP `memory_rule_check`）；
+5. `next_action=repair` 时按 `repair_instructions` 修复，再以 `attempt+1` 重试；
+6. `next_action=stop` 时报告未修复项，不要静默通过。
 
 宿主侧只负责调用，不在 Hook 中重写 Zymor 的检索、写入或规则逻辑。
 
 ## 参考集成
 
-- Claude Code：`integrations/claude-code/session-start.sh` + `settings.example.json`；
+- Claude Code：`integrations/claude-code/session-start.sh`（读）+ `capture.sh`（写）+ `settings.example.json`；
 - Codex：`integrations/codex/README.md`；
 - DSH：独立插件项目按本契约接入。
 

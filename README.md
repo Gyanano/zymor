@@ -41,6 +41,16 @@
 - **会做梦，不只是检索**：离线巩固、仲裁、跨域联想与人格提炼。
 - **可渐进披露**：目录导航 + 精确检索 + 链接跳转，而不是每次把整个库塞进上下文。
 
+## 两种用法
+
+| | 本地模式 | 云端模式 |
+| --- | --- | --- |
+| 记忆存在哪 | 每台电脑的 `.zymor/vault` 与 `~/.zymor/vault` | 一台服务器 |
+| 提炼在哪运行 | 本机 `zymor dream` | 服务器 |
+| 多台电脑、多个工具 | 各自独立，可用 `zymor sync` 互相补齐 | 自动共用同一份记忆 |
+| 接入方式 | `zymor init` + MCP（stdio） | `zymor connect <地址> --claude-code` |
+| 文档 | [`docs/guide/quickstart.md`](docs/guide/quickstart.md) | [`docs/guide/cloud.md`](docs/guide/cloud.md) |
+
 ## 安装
 
 ```bash
@@ -96,6 +106,11 @@ uv run --project <repo> zymor mcp             # MCP server（stdio）
 | `zymor read ID` | 读取节点 |
 | `zymor log --kind KIND --content TEXT` | 追加 L0 事件 |
 | `zymor capture --path . [--once]` | 轮询文件变化并写入 L0 |
+| `zymor ingest PATH...` | 把对话记录增量导入 L0 |
+| `zymor hook capture` | 读取宿主 Hook 的 stdin，把本次会话的新对话上传到服务器或写入本地 L0 |
+| `zymor hook recall` | 读取宿主 Hook 的 stdin，输出与本条用户消息相关的记忆 |
+| `zymor connect URL [--claude-code]` | 把本机接到一台 Zymor 服务器：保存地址与 token，安装钩子 |
+| `zymor sync [status\|push\|pull\|mirror]` | 与远端增量同步知识节点；`mirror` 把服务器的库下载成本地只读副本 |
 | `zymor focus --session ID` | 查看/更新 L1 焦点 |
 | `zymor index sync\|rebuild\|catalog\|embed` | 索引、目录、向量维护 |
 | `zymor rules / rule-check` | 读取/执行 verified 项目规则 |
@@ -112,7 +127,9 @@ uv run --project <repo> zymor mcp             # MCP server（stdio）
 ```bash
 uv run zymor mcp                       # stdio（本地宿主）
 export ZYMOR_MCP_HTTP_TOKEN=<随机串>
-uv run zymor mcp --transport http      # Streamable HTTP
+uv run zymor mcp --transport http      # Streamable HTTP（本机）
+uv run zymor mcp --transport http --host 0.0.0.0 \
+  --tls-cert cert.pem --tls-key key.pem   # HTTPS（对外监听必须启用 TLS）
 uv run zymor mcp --read-only           # 只读模式
 ```
 
@@ -142,6 +159,11 @@ uv run pytest tests/test_open_smoke.py -q
 | `docs/guide/` | 快速开始、做梦、MCP 接入、规则检查、排障 |
 | `docs/guide/migration.md` | 导出/导入与 MemoryAdapter 接口 |
 | `docs/guide/harness-hooks.md` | Harness Hook/Skill 契约与接入 |
+| `docs/guide/capture.md` | 对话捕获：Claude Code Hook、文件导入、HTTP 推送 |
+| `docs/guide/deployment.md` | 服务器部署：TLS、常驻运行、定时做梦、客户端接入 |
+| `docs/guide/cloud.md` | 云端模式：接入一次，各台电脑自动上传对话、自动取回记忆，提炼在服务器完成 |
+| `docs/guide/sync.md` | 云端同步：记忆留在本地，服务器只存副本；增量、多机合并、冲突与删除规则 |
+| `docs/reference/configuration.md` | 配置项参考 |
 | `integrations/` | Claude Code / Codex 参考接入 |
 | `docs/guide/panel.md` | 本地只读记忆面板 |
 | `docs/guide/validation.md` | 社区验证与问题反馈 |
@@ -156,12 +178,14 @@ uv run pytest tests/test_open_smoke.py -q
 ## 已知边界
 
 - **没有常驻 daemon**：做梦由 CLI、`memory_dream` 或 `dream.auto_after_close=true` 的关闭事件触发。
-- **L0 捕获依赖 Agent**：`memory_close` 会补一条关闭事件，但事件级捕获仍需要 Agent 调用 `memory_log`。
+- **对话捕获需要接入一次**：Claude Code 通过 Hook 自动捕获；其他工具用 `zymor ingest` 导入文件，或调用 `POST /ingest`。没有接入的宿主仍然只能靠 Agent 调用 `memory_log`。
+- **单次出现的候选不会立即成为节点**：它进入待定池（默认保留 90 天），在别的会话再次出现时才写入。需要立即写入时设 `dream.eager_singletons = true`。
 - **规则检查需要主动调用**：`memory_rules` 负责加载，`memory_rule_check` 负责校验；不调用就不会检查。
 - **跨项目晋升是标签/人工触发的**：带 `cross-project` 标签的 verified L3 才自动晋升；`promotion.min_projects` 可加多项目门槛。
 - **外部 API 版本靠本地清单**：`zymor anchor --api` 检查 repo 内的 JSON/TOML 版本清单，不轮询远端服务。
 - **语义检索可选**：需要 `[embedding]` 配置并先运行 `zymor index embed`。
 - **MCP HTTP auth 是静态 Bearer token**：没有过期/作用域/吊销；stdio 依赖本机信任模型。
+- **一个 MCP 进程绑定一个库**：服务器部署适合放用户库；锚点、规则检查等依赖本地仓库文件的功能留在各机器的项目库。
 
 ## 贡献
 

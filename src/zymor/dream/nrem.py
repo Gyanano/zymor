@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from zymor.config import Config
+from zymor.dream.pending import PendingPool
 from zymor.dream.promote import promote_l2_to_l3
 from zymor.dream.state import Watermarks, load_unprocessed_events, log_action
 from zymor.dream.types import (
@@ -42,6 +43,12 @@ RECENT_WINDOW_DAYS = 30
 DEFAULT_BATCH_EVENTS = 200
 DEFAULT_MAX_EVENTS = 2000
 DEFAULT_MAX_CANDIDATES = 300
+# 相关性门槛：共享词项数与重叠系数（共享数 / 较短一方的词项数）都要达标。
+# 只共享一个词项不算相关，否则无关候选会互相帮对方通过复发门控。
+RELATED_MIN_SHARED = 3
+RELATED_MIN_RATIO = 0.4
+RELATED_TAG_MIN_SHARED = 2
+RELATED_TAG_MIN_RATIO = 0.2
 POINTER_RE = re.compile(r"^l0:[^:]+:\d+$")
 GATE_RUBRIC = (
     "丢弃：预训练常识；当前仓库 grep 或 git 一次调用即可获知的事实；"
@@ -72,6 +79,7 @@ class _Cluster:
     candidates: list[_Candidate]
     targets: list[dict[str, Any]]
     target_ids: list[str]
+    recalled: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -89,6 +97,8 @@ def run_nrem(ctx: DreamContext, plan: DreamPlan, watermarks: Watermarks) -> Phas
         "processed_session_seq": {},
         "stopped": None,
         "dropped_singletons": 0,
+        "deferred_singletons": 0,
+        "recalled_pending": 0,
         "clusters": 0,
         "actions": {
             "create": 0,
@@ -120,7 +130,7 @@ def run_nrem(ctx: DreamContext, plan: DreamPlan, watermarks: Watermarks) -> Phas
         for session_id, session_events in _group_by_session(events).items():
             session_ok = True
             session_max = max(event.seq for event in session_events)
-            project = _session_project(ctx.vault, session_id)
+            project = _session_project(ctx.vault, session_id, session_events)
             for batch in _chunks(session_events, batch_size):
                 if stopped is not None:
                     session_ok = False
@@ -410,55 +420,83 @@ def _consolidate(
     result: PhaseResult,
     warnings: list[str],
 ) -> None:
-    clusters, dropped = _build_clusters(ctx, candidates)
-    details["dropped_singletons"] += dropped
-    result.skipped += dropped
+    pool = PendingPool.load(
+        ctx.vault, retention_days=_config_int(ctx.config, "dream.pending_retention_days", 90)
+    )
+    clusters, deferred = _build_clusters(ctx, candidates, pool)
+    # 单次出现的候选不再丢弃：进待定池，等后续会话再次出现时一起巩固。
+    details["dropped_singletons"] += deferred
+    details["deferred_singletons"] += deferred
+    result.skipped += deferred
     details["clusters"] += len(clusters)
-    if dropped:
+    if deferred:
         log_action(
             ctx.vault,
             ctx.run_id,
             PHASE,
             "gate-dropped",
-            details={"count": dropped, "session_id": session_id},
+            details={"count": deferred, "session_id": session_id, "deferred": True},
         )
+    try:
+        for cluster in clusters:
+            _consolidate_cluster(ctx, cluster, session_id, project, details, result, warnings)
+            if cluster.recalled:
+                # 写入成功后才把已复发的记录移出待定池，失败时保留以便重试。
+                pool.remove(cluster.recalled)
+                details["recalled_pending"] += len(cluster.recalled)
+    finally:
+        pool.save(ctx.vault)
+
+
+def _consolidate_cluster(
+    ctx: DreamContext,
+    cluster: _Cluster,
+    session_id: str,
+    project: str | None,
+    details: dict[str, Any],
+    result: PhaseResult,
+    warnings: list[str],
+) -> None:
     eager = bool(ctx.config.get("dream.eager_singletons", False))
-    for cluster in clusters:
-        if not cluster.targets and len(cluster.candidates) == 1 and eager:
-            _execute_create(ctx, cluster, session_id, project, details, result, warnings)
-            continue
-        dedupe = ctx.client("dedupe")
-        if dedupe is None:
-            _fallback_create(
-                ctx,
-                cluster,
-                session_id,
-                project,
-                details,
-                result,
-                warnings,
-                "dedupe 角色未配置 LLM 客户端，已按 §4.8 写新 hypothesis",
-            )
-            continue
-        decision = _ask_consolidation(ctx, cluster, dedupe, warnings)
-        if decision is None:
-            _fallback_create(
-                ctx,
-                cluster,
-                session_id,
-                project,
-                details,
-                result,
-                warnings,
-                "巩固 LLM 调用失败或输出不合法，已按 §4.8 写新 hypothesis",
-            )
-            continue
-        _execute_decision(ctx, cluster, decision, session_id, project, details, result, warnings)
+    if not cluster.targets and len(cluster.candidates) == 1 and eager:
+        _execute_create(ctx, cluster, session_id, project, details, result, warnings)
+        return
+    dedupe = ctx.client("dedupe")
+    if dedupe is None:
+        _fallback_create(
+            ctx,
+            cluster,
+            session_id,
+            project,
+            details,
+            result,
+            warnings,
+            "dedupe 角色未配置 LLM 客户端，已按 §4.8 写新 hypothesis",
+        )
+        return
+    decision = _ask_consolidation(ctx, cluster, dedupe, warnings)
+    if decision is None:
+        _fallback_create(
+            ctx,
+            cluster,
+            session_id,
+            project,
+            details,
+            result,
+            warnings,
+            "巩固 LLM 调用失败或输出不合法，已按 §4.8 写新 hypothesis",
+        )
+        return
+    _execute_decision(ctx, cluster, decision, session_id, project, details, result, warnings)
 
 
-def _build_clusters(ctx: DreamContext, candidates: list[_Candidate]) -> tuple[list[_Cluster], int]:
+def _build_clusters(
+    ctx: DreamContext, candidates: list[_Candidate], pool: PendingPool | None = None
+) -> tuple[list[_Cluster], int]:
     if not candidates:
         return [], 0
+    pool = pool if pool is not None else PendingPool()
+    max_pending = _config_int(ctx.config, "dream.pending_max", 500)
     index = Index(ctx.vault.root)
     recent = _recent_rows(ctx, index)
     hits = [_find_hits(index, candidate, recent) for candidate in candidates]
@@ -472,17 +510,53 @@ def _build_clusters(ctx: DreamContext, candidates: list[_Candidate]) -> tuple[li
             for row in hits[position]:
                 target_map.setdefault(str(row["id"]), row)
         targets = _sort_targets(list(target_map.values()))[:MAX_TARGETS]
-        if not targets and len(group) == 1 and not eager:
+        members = [candidates[position] for position in group]
+        recalled = _recall_pending(pool, members)
+        if not targets and len(group) == 1 and not recalled and not eager:
+            pool.add(asdict(members[0]), max_entries=max_pending)
             dropped += 1
             continue
         clusters.append(
             _Cluster(
-                candidates=[candidates[position] for position in group],
+                candidates=members + [_candidate_from_record(record) for record in recalled],
                 targets=targets,
                 target_ids=[str(row["id"]) for row in targets],
+                recalled=recalled,
             )
         )
     return clusters, dropped
+
+
+def _recall_pending(pool: PendingPool, members: list[_Candidate]) -> list[dict[str, Any]]:
+    """入参：待定池与本批候选。出参：与候选相关、且来自别的事件的待定记录。"""
+    recalled: list[dict[str, Any]] = []
+    for record in pool.entries:
+        stored = _candidate_from_record(record)
+        for member in members:
+            # 同一批事件重跑时会再次提取出同一个候选，它不能算作自己的复发。
+            if stored.session_id == member.session_id and (
+                set(stored.evidence) & set(member.evidence) or stored.title == member.title
+            ):
+                continue
+            if _candidates_overlap(stored, member):
+                recalled.append(record)
+                break
+    return recalled
+
+
+def _candidate_from_record(record: dict[str, Any]) -> _Candidate:
+    return _Candidate(
+        title=str(record.get("title") or ""),
+        summary=str(record.get("summary") or ""),
+        body=str(record.get("body") or ""),
+        category=str(record.get("category") or "semantic"),
+        layer=str(record.get("layer") or "L3"),
+        confidence=float(record.get("confidence") or 0.4),
+        evidence=[str(item) for item in record.get("evidence") or []],
+        tags=[str(item) for item in record.get("tags") or []],
+        links=[str(item) for item in record.get("links") or []],
+        session_id=str(record.get("session_id") or ""),
+    )
 
 
 def _recent_rows(ctx: DreamContext, index: Index) -> list[dict[str, Any]]:
@@ -532,10 +606,21 @@ def _sort_targets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _row_overlaps(row: dict[str, Any], candidate: _Candidate) -> bool:
-    if set(candidate.tags) & set(row.get("tags") or []):
-        return True
-    row_tokens = _tokens(str(row.get("title") or ""))
-    return bool(row_tokens & _tokens(candidate.title))
+    shared_tag = bool(set(candidate.tags) & set(row.get("tags") or []))
+    row_tokens = _tokens(" ".join([str(row.get("title") or ""), str(row.get("summary") or "")]))
+    return _related(row_tokens, _tokens(" ".join([candidate.title, candidate.summary])), shared_tag)
+
+
+def _related(left: set[str], right: set[str], shared_tag: bool) -> bool:
+    """入参：两组词项与是否共享标签。出参：是否相关。"""
+    smaller = min(len(left), len(right))
+    if smaller == 0:
+        return False
+    shared = len(left & right)
+    ratio = shared / smaller
+    if shared_tag:
+        return shared >= RELATED_TAG_MIN_SHARED and ratio >= RELATED_TAG_MIN_RATIO
+    return shared >= min(RELATED_MIN_SHARED, smaller) and ratio >= RELATED_MIN_RATIO
 
 
 def _group_candidates(
@@ -569,11 +654,9 @@ def _group_candidates(
 
 
 def _candidates_overlap(left: _Candidate, right: _Candidate) -> bool:
-    if set(left.tags) & set(right.tags):
-        return True
     left_tokens = _tokens(" ".join([left.title, left.summary]))
     right_tokens = _tokens(" ".join([right.title, right.summary]))
-    return bool(left_tokens & right_tokens)
+    return _related(left_tokens, right_tokens, bool(set(left.tags) & set(right.tags)))
 
 
 def _tokens(text: str) -> set[str]:
@@ -1115,15 +1198,23 @@ def _first_paragraph(text: str) -> str:
     return " ".join(paragraph.split())
 
 
-def _session_project(vault: Vault, session_id: str) -> str | None:
+def _session_project(
+    vault: Vault, session_id: str, events: list[EventEntry] | None = None
+) -> str | None:
     path = vault.focus_path(session_id)
-    if not path.is_file():
-        return None
-    try:
-        focus = FocusFile.from_markdown(path.read_text(encoding="utf-8"))
-    except (OSError, ZymorError):
-        return None
-    return focus.project
+    if path.is_file():
+        try:
+            focus = FocusFile.from_markdown(path.read_text(encoding="utf-8"))
+        except (OSError, ZymorError):
+            focus = None
+        if focus is not None and focus.project:
+            return focus.project
+    # 远端推送来的对话没有焦点文件，来源项目记在事件的 meta 里。
+    for event in events or []:
+        project = event.meta.get("project")
+        if isinstance(project, str) and project:
+            return project
+    return None
 
 
 def _group_by_session(events: list[EventEntry]) -> dict[str, list[EventEntry]]:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -82,6 +84,148 @@ DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8765
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+LOOPBACK_ALLOWED = ("127.0.0.1", "localhost", "[::1]")
+WILDCARD_HOSTS = ("0.0.0.0", "[::]", "::")
+MIN_TOKEN_CHARS = 24
+MAX_INGEST_BYTES = 2 * 1024 * 1024
+MAX_INGEST_MESSAGES = 2000
+MAX_QUERY_BYTES = 64 * 1024
+
+
+def token_matches(expected: str, presented: str) -> bool:
+    """入参：期望 token 与请求携带的 token。出参：是否一致。定长时间比较，防止按耗时猜 token。"""
+    if not expected or not presented:
+        return False
+    return hmac.compare_digest(expected.encode("utf-8"), presented.encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class HttpSettings:
+    host: str
+    port: int
+    tls_cert: str | None
+    tls_key: str | None
+    public_url: str
+    allowed_hosts: tuple[str, ...]
+
+    @property
+    def tls(self) -> bool:
+        """入参：无。出参：是否由本进程终结 TLS。"""
+        return self.tls_cert is not None
+
+    @property
+    def loopback(self) -> bool:
+        """入参：无。出参：是否只监听本机回环地址。"""
+        return self.host in LOOPBACK_HOSTS
+
+
+def resolve_http_settings(
+    config: Config,
+    *,
+    host: str | None = None,
+    port: int | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+) -> HttpSettings:
+    """入参：配置与命令行覆盖项。出参：HTTP 传输设置。校验 TLS 与监听地址的组合是否安全。"""
+    resolved_host = str(host or config.get("mcp.host", DEFAULT_HTTP_HOST) or DEFAULT_HTTP_HOST)
+    resolved_port = int(port or _config_int(config, "mcp.port", DEFAULT_HTTP_PORT))
+    cert = tls_cert or config.get("mcp.tls_cert", None) or None
+    key = tls_key or config.get("mcp.tls_key", None) or None
+    if bool(cert) != bool(key):
+        raise UsageError(
+            "TLS 证书与私钥必须同时提供",
+            hint="同时设置 --tls-cert 与 --tls-key（或 [mcp].tls_cert 与 [mcp].tls_key）",
+        )
+    for label, value in (("证书", cert), ("私钥", key)):
+        if value and not Path(str(value)).expanduser().is_file():
+            raise UsageError(f"TLS {label}文件不存在: {value}")
+    cert_path = str(Path(str(cert)).expanduser()) if cert else None
+    key_path = str(Path(str(key)).expanduser()) if key else None
+    loopback = resolved_host in LOOPBACK_HOSTS
+    if (
+        not loopback
+        and cert_path is None
+        and not bool(config.get("mcp.allow_insecure_http", False))
+    ):
+        raise UsageError(
+            f"监听非回环地址 {resolved_host} 时必须启用 TLS，否则 token 与记忆内容以明文传输",
+            hint=(
+                "提供 --tls-cert/--tls-key；或监听 127.0.0.1 并在前面放 TLS 反向代理；"
+                "确认链路已加密（如内网隧道）时可设 [mcp].allow_insecure_http = true"
+            ),
+        )
+    scheme = "https" if cert_path else "http"
+    public = str(config.get("mcp.public_url", None) or "").rstrip("/")
+    if not public:
+        public = f"{scheme}://{resolved_host}:{resolved_port}"
+    raw_hosts = config.get("mcp.allowed_hosts", []) or []
+    hosts = tuple(str(item) for item in raw_hosts) if isinstance(raw_hosts, list) else ()
+    return HttpSettings(
+        host=resolved_host,
+        port=resolved_port,
+        tls_cert=cert_path,
+        tls_key=key_path,
+        public_url=public,
+        allowed_hosts=hosts,
+    )
+
+
+def allowed_hosts(settings: HttpSettings) -> list[str]:
+    """入参：HTTP 设置。出参：允许出现在 Host 头里的主机名（不含端口通配）。
+
+    反向代理会把外部域名原样放进 Host 头，所以 public_url 的域名必须在名单里，
+    否则 SDK 的 DNS rebinding 防护会拒绝代理转发来的请求。
+    """
+    hosts = list(settings.allowed_hosts)
+    netloc = settings.public_url.split("://", 1)[-1].split("/", 1)[0]
+    # 去掉端口；带方括号的 IPv6 字面量保留方括号。
+    name = netloc.rsplit(":", 1)[0] if netloc.count(":") == 1 or "]:" in netloc else netloc
+    if name and name not in WILDCARD_HOSTS:
+        hosts.append(name)
+    if not hosts and not settings.loopback:
+        # 监听通配地址又没有声明域名时无从校验，交给 TLS 与 token 把关。
+        return []
+    hosts.extend(LOOPBACK_ALLOWED)
+    return list(dict.fromkeys(hosts))
+
+
+def transport_security(settings: HttpSettings) -> Any:
+    """入参：HTTP 设置。出参：SDK 的传输安全设置；没有可用主机名时返回 None（不校验 Host）。"""
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    hosts = allowed_hosts(settings)
+    if not hosts:
+        return None
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts + [f"{item}:*" for item in hosts],
+        allowed_origins=[
+            f"{scheme}://{item}{suffix}"
+            for item in hosts
+            for scheme in ("https", "http")
+            for suffix in ("", ":*")
+        ],
+    )
+
+
+def run_http(server: MCPServer, settings: HttpSettings) -> None:
+    """入参：MCP server 与 HTTP 设置。出参：无。启动 Streamable HTTP 服务，可选由本进程终结 TLS。"""
+    import uvicorn
+
+    security = transport_security(settings)
+    app = server.streamable_http_app(host=settings.host, transport_security=security)
+    uvicorn.run(
+        app,
+        host=settings.host,
+        port=settings.port,
+        ssl_certfile=settings.tls_cert,
+        ssl_keyfile=settings.tls_key,
+        log_level="info",
+    )
+
+
 class StaticTokenVerifier:
     def __init__(self, expected_token: str, *, resource: str | None = None) -> None:
         self._expected_token = expected_token
@@ -89,7 +233,7 @@ class StaticTokenVerifier:
 
     async def verify_token(self, token: str) -> AccessToken | None:
         """入参：Bearer token。出参：匹配时的 AccessToken，否则 None。静态全等校验。"""
-        if not self._expected_token or token != self._expected_token:
+        if not token_matches(self._expected_token, token):
             return None
         return AccessToken(
             token=token,
@@ -105,6 +249,7 @@ def build_server(
     *,
     read_only: bool | None = None,
     http_token: str | None = None,
+    http_settings: HttpSettings | None = None,
 ) -> MCPServer:
     """入参：vault、配置、只读覆盖与 HTTP token。出参：MCP server。按 §7 注册全部接口。"""
     if read_only is None:
@@ -116,7 +261,7 @@ def build_server(
     auth_settings: AuthSettings | None = None
     token_verifier: TokenVerifier | None = None
     if http_token is not None and http_token.strip():
-        auth_settings, token_verifier = _http_auth(config, http_token.strip())
+        auth_settings, token_verifier = _http_auth(config, http_token.strip(), http_settings)
     server = MCPServer(
         name="zymor",
         title="Zymor",
@@ -240,7 +385,215 @@ def build_server(
     if bool(config.get("mcp.prompts.enabled", True)):
         _register_prompts(server, vault, global_vault)
 
+    if http_token is not None and http_token.strip():
+        _register_http_routes(
+            server,
+            vault,
+            http_token.strip(),
+            ingest=not read_only and bool(config.get("mcp.ingest_endpoint", True)),
+            sync=bool(config.get("mcp.sync_endpoint", True)),
+            writable=not read_only,
+            config=config,
+            global_vault=global_vault,
+        )
     return server
+
+
+def _register_http_routes(
+    server: MCPServer,
+    vault: Vault,
+    token: str,
+    *,
+    ingest: bool,
+    sync: bool = False,
+    writable: bool = True,
+    config: Config | None = None,
+    global_vault: Vault | None = None,
+) -> None:
+    """自定义路由不经过 SDK 的鉴权中间件，所以每个处理函数自己校验 Bearer token。"""
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+
+    def unauthorized(request: Request) -> Response | None:
+        scheme, _, presented = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() == "bearer" and token_matches(token, presented.strip()):
+            return None
+        return JSONResponse(
+            {"error": "unauthorized"}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    async def read_json(request: Request, limit: int) -> tuple[Any, Response | None]:
+        body = await request.body()
+        if len(body) > limit:
+            return None, JSONResponse({"error": "payload_too_large"}, status_code=413)
+        try:
+            return json.loads(body), None
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None, JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    if config is not None:
+        from zymor.autodream import AutoDreamer
+
+        active_config = config
+        dreamer = AutoDreamer(vault, active_config)
+
+        @server.custom_route("/context", methods=["POST"])  # type: ignore[untyped-decorator]
+        async def context_route(request: Request) -> Response:
+            import anyio
+
+            denied = unauthorized(request)
+            if denied is not None:
+                return denied
+            payload, failed = await read_json(request, MAX_QUERY_BYTES)
+            if failed is not None:
+                return failed
+            status, result = await anyio.to_thread.run_sync(
+                lambda: context_request(vault, active_config, global_vault, payload)
+            )
+            return JSONResponse(result, status_code=status)
+
+        @server.custom_route("/recall", methods=["POST"])  # type: ignore[untyped-decorator]
+        async def recall_route(request: Request) -> Response:
+            import anyio
+
+            denied = unauthorized(request)
+            if denied is not None:
+                return denied
+            payload, failed = await read_json(request, MAX_QUERY_BYTES)
+            if failed is not None:
+                return failed
+            status, result = await anyio.to_thread.run_sync(
+                lambda: recall_request(vault, active_config, global_vault, payload)
+            )
+            return JSONResponse(result, status_code=status)
+
+    else:
+        dreamer = None
+
+    if sync:
+
+        @server.custom_route("/sync", methods=["POST"])  # type: ignore[untyped-decorator]
+        async def sync_route(request: Request) -> Response:
+            import anyio
+
+            from zymor.sync import MAX_REQUEST_BYTES, handle_sync_request
+
+            denied = unauthorized(request)
+            if denied is not None:
+                return denied
+            payload, failed = await read_json(request, MAX_REQUEST_BYTES)
+            if failed is not None:
+                return failed
+            status, result = await anyio.to_thread.run_sync(
+                lambda: handle_sync_request(vault, payload, writable=writable)
+            )
+            return JSONResponse(result, status_code=status)
+
+    @server.custom_route("/healthz", methods=["GET"])  # type: ignore[untyped-decorator]
+    async def healthz(_request: Request) -> Response:
+        return JSONResponse({"status": "ok"})
+
+    if not ingest:
+        return
+
+    @server.custom_route("/ingest", methods=["POST"])  # type: ignore[untyped-decorator]
+    async def ingest_route(request: Request) -> Response:
+        import anyio
+
+        denied = unauthorized(request)
+        if denied is not None:
+            return denied
+        payload, failed = await read_json(request, MAX_INGEST_BYTES)
+        if failed is not None:
+            return failed
+        status, result = await anyio.to_thread.run_sync(ingest_payload, vault, payload)
+        if status == 200 and dreamer is not None:
+            result["dream_started"] = dreamer.notify(int(result.get("captured") or 0))
+        return JSONResponse(result, status_code=status)
+
+
+def _optional_text(payload: dict[str, Any], name: str, limit: int = 4000) -> str | None:
+    value = payload.get(name)
+    return value.strip()[:limit] if isinstance(value, str) and value.strip() else None
+
+
+def _optional_int(payload: dict[str, Any], name: str, low: int, high: int) -> int | None:
+    value = payload.get(name)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return max(low, min(high, value))
+
+
+def context_request(
+    vault: Vault, config: Config, global_vault: Vault | None, payload: Any
+) -> tuple[int, dict[str, Any]]:
+    """入参：vault、配置与 `{task, project, budget_tokens}`。出参：状态码与会话启动上下文。"""
+    from zymor.ingest import safe_project
+
+    if not isinstance(payload, dict):
+        return 400, {"error": "invalid_payload", "hint": "请求体必须是 JSON 对象"}
+    try:
+        result = _context_payload(
+            vault,
+            config,
+            global_vault,
+            _optional_text(payload, "task"),
+            safe_project(payload.get("project")),
+            _optional_int(payload, "budget_tokens", 100, 8000),
+        )
+    except ZymorError as error:
+        return 400, error.to_dict()
+    return 200, result
+
+
+def recall_request(
+    vault: Vault, config: Config, global_vault: Vault | None, payload: Any
+) -> tuple[int, dict[str, Any]]:
+    """入参：vault、配置与 `{query, project, top_k, exclude_ids}`。出参：状态码与相关记忆。"""
+    from zymor.ingest import safe_project
+    from zymor.recall import recall
+
+    if not isinstance(payload, dict):
+        return 400, {"error": "invalid_payload", "hint": "请求体必须是 JSON 对象"}
+    query = _optional_text(payload, "query")
+    if query is None:
+        return 400, {"error": "invalid_payload", "hint": "缺少 query"}
+    raw_exclude = payload.get("exclude_ids")
+    exclude = [str(item) for item in raw_exclude[:500]] if isinstance(raw_exclude, list) else []
+    try:
+        result = recall(
+            _scopes(vault, global_vault),
+            query,
+            config=config,
+            project=safe_project(payload.get("project")),
+            top_k=_optional_int(payload, "top_k", 1, 20),
+            token_budget=_optional_int(payload, "token_budget", 50, 4000),
+            exclude_ids=exclude,
+        )
+    except ZymorError as error:
+        return 400, error.to_dict()
+    return 200, result
+
+
+def ingest_payload(vault: Vault, payload: Any) -> tuple[int, dict[str, Any]]:
+    """入参：vault 与 `{session_id, messages}`。出参：HTTP 状态码与响应体。把推送的对话写入 L0。"""
+    from zymor.ingest import ingest_messages
+
+    if not isinstance(payload, dict):
+        return 400, {"error": "invalid_payload", "hint": "请求体必须是 JSON 对象"}
+    messages = payload.get("messages")
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return 400, {"error": "invalid_payload", "hint": "缺少 session_id"}
+    if not isinstance(messages, list) or not messages:
+        return 400, {"error": "invalid_payload", "hint": "messages 必须是非空数组"}
+    if len(messages) > MAX_INGEST_MESSAGES:
+        return 413, {"error": "too_many_messages", "hint": f"单次最多 {MAX_INGEST_MESSAGES} 条"}
+    try:
+        result = ingest_messages(vault, session_id, messages, project=payload.get("project"))
+    except ZymorError as error:
+        return 409 if error.kind == "locked" else 400, error.to_dict()
+    return 200, result.to_dict()
 
 
 def _register_write_tools(
@@ -508,10 +861,15 @@ def _resolve_global_vault(config: Config, project_vault: Vault) -> Vault | None:
     return candidate
 
 
-def _http_auth(config: Config, token: str) -> tuple[AuthSettings, StaticTokenVerifier]:
-    host = str(config.get("mcp.host", DEFAULT_HTTP_HOST))
-    port = _config_int(config, "mcp.port", DEFAULT_HTTP_PORT)
-    base_url = f"http://{host}:{port}"
+def _http_auth(
+    config: Config, token: str, http_settings: HttpSettings | None = None
+) -> tuple[AuthSettings, StaticTokenVerifier]:
+    if http_settings is not None:
+        base_url = http_settings.public_url
+    else:
+        host = str(config.get("mcp.host", DEFAULT_HTTP_HOST))
+        port = _config_int(config, "mcp.port", DEFAULT_HTTP_PORT)
+        base_url = f"http://{host}:{port}"
     auth_settings = AuthSettings(
         issuer_url=AnyHttpUrl(base_url),
         resource_server_url=AnyHttpUrl(base_url),
@@ -922,7 +1280,7 @@ def _write_payload(
 
 def _write_client(config: Config) -> JsonChatClient | None:
     try:
-        model = config.get("llm.models.dedupe", None)
+        model = config.get("llm.models.dedupe", None) or config.get("llm.models.default", None)
     except KeyError:
         return None
     if not model:

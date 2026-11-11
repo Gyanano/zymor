@@ -2,6 +2,43 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
+## [Unreleased]
+
+### Added
+
+- 对话捕获：`zymor ingest` 把 Claude Code 会话 JSONL 或通用 `{role, content}` 记录增量导入 L0；`zymor hook capture` 供宿主 Hook 调用；Claude Code 参考集成新增 `Stop` / `PreCompact` / `SessionEnd` 捕获钩子。导入前脱敏并去除宿主注入的包装块。
+- HTTP 入口：`POST /ingest`（Bearer 鉴权，推送对话）与 `GET /healthz`。
+- 云端模式：`zymor connect <地址> [--claude-code]` 把本机接到服务器并安装钩子；`zymor hook capture` 在配置了服务器时上传对话（带来源项目，失败后自动补传）；新增 `zymor hook recall`，每条用户消息按内容取回相关记忆；`zymor hook context` 在配置了服务器时从服务器取启动上下文。`[remote].exclude` 与项目级 `[remote]` 配置可按目录关闭上传与注入。
+- HTTP 入口 `POST /recall` 与 `POST /context`；`POST /ingest` 接受 `project`。
+- 自动召回的相关性门槛（`[recall]`）：只注入与消息足够相关的记忆，同一会话不重复注入。
+- 按量自动做梦：`dream.auto_after_ingest_events`、`auto_min_interval_minutes`、`auto_max_runs_per_day`（默认关闭）。
+- `zymor sync mirror`：把服务器的库下载成本地只读 Markdown 副本。
+- 检索支持 `prefer_project`：来源项目相同的节点加分，不过滤其他项目。
+- 云端同步：`zymor sync [status|push|pull]` 与服务端 `POST /sync`。本地库是事实源，远端按分区保存文件副本；按 sha256 增量传输；多台电脑同步到同一分区后互相补齐；主动删除通过删除标记传播；冲突不自动覆盖。`--include-events` 可额外备份 L0（只上传）。
+- HTTPS：`zymor mcp --host/--tls-cert/--tls-key` 与 `[mcp].tls_cert/tls_key/public_url/allowed_hosts/allow_insecure_http`。
+- 待定候选池 `dream/pending.jsonl`：单次出现的候选等待后续会话复发，`dream.pending_retention_days` / `dream.pending_max` 可调。
+- `[llm.models].default`：所有 LLM 角色的兜底模型；`dedupe` 角色补入默认配置。
+- `dream.budget.max_tokens`：token 总量上限；run 报告新增 `unpriced_calls`。
+- 文档：`docs/guide/cloud.md`、`docs/guide/capture.md`、`docs/guide/deployment.md`、`docs/guide/sync.md`、`docs/reference/configuration.md`。
+
+### Changed
+
+- 命令行入口改为 `zymor.__main__:main`：`zymor hook recall` 在配置了服务器时走轻量路径，不加载完整 CLI。升级后需要重新安装一次（`pip install -U zymor` 或 `uv sync`）。
+- Claude Code 示例配置直接调用 `zymor hook ...`，并新增 `UserPromptSubmit` 钩子。
+
+- 检索：全部词项命中的结果不足 `top_k` 时放宽为命中任一词项，并按相关度下限过滤；放宽得到的命中在 `why` 里标 `partial-match`。
+- 混合检索改用倒数排名融合（RRF）；命中同时返回 `lexical_score` / `semantic_score`。**`score` 的取值范围变为 0 到 1 的融合分**，不再是词法综合分或余弦相似度。
+- 语义检索从索引批量取元数据，不再为每个向量读一次节点文件；`zymor index embed` 只为新增或改过的节点计算向量。
+- 监听非回环地址且没有 TLS 时，`zymor mcp` 拒绝启动；对外监听要求 token ≥ 24 个字符。
+
+### Fixed
+
+- 复发门控不再永久丢弃跨会话的知识：此前单次候选被丢弃后水位线照常推进，同一件事在后续会话再次出现也无法被识别。
+- 候选相关性判定不再把「共享任意一个词项」当作相关，无关候选不会再互相帮对方通过门控。
+- 模型没有配置单价时 `max_usd` 形同虚设的问题：增加 token 上限兜底并给出提示。
+- 没有任何可用 LLM 角色时，`zymor dream` 给出明确提示，不再静默跳过。
+- HTTP token 改用定长时间比较。
+
 ## [0.5.0] - 2026-10-29
 
 ### Added

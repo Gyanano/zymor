@@ -56,9 +56,11 @@ STATUS_BOOSTS: dict[str, float] = {
 DEFAULT_TOP_K = 8
 TOP_K_MAX = 50
 CANDIDATE_LIMIT = 100
+RELAXED_MIN_RELEVANCE = 0.35
 HIT_REFERENCE = 50.0
 FACET_BOOST = 0.10
 CAPSULE_PROJECT_BOOST = 0.05
+PREFER_PROJECT_BOOST = 0.08
 PROJECT_SCOPE_BOOST = 0.10
 TRUNCATION_MARKER = "…（已截断）"
 CATALOG_LINE_RE = re.compile(
@@ -75,6 +77,8 @@ class SearchFilters:
     statuses: list[str] | None = None
     tags: list[str] | None = None
     project: str | None = None
+    # prefer_project 只加分不过滤：来源项目相同的节点排前面，别的项目的知识仍然能被找到。
+    prefer_project: str | None = None
     applies_to: list[str] | None = None
     updated_since: str | None = None
     valid_only: bool = True
@@ -277,26 +281,52 @@ def memory_search(
             ) from error
 
     now = utc_now()
-    candidates: list[tuple[str, Vault, dict[str, Any]]] = []
-    seen: dict[str, str] = {}
-    for label, vault in scopes:
-        index = Index(vault.root)
-        rows = _with_index_recovery(
-            index,
-            functools.partial(_fetch_candidate_rows, index, match_query, active_filters, statuses),
-        )
-        for row in rows:
-            if not _passes_filters(row, active_filters, statuses, now, updated_since):
-                continue
-            node_id = str(row["id"])
-            if node_id in seen:
-                warnings.append(
-                    f"跨库 id 冲突：{node_id} 同时存在于 {seen[node_id]} 与 {label}，"
-                    f"已保留 {seen[node_id]} 版本，需手工解决"
-                )
-                continue
-            seen[node_id] = label
-            candidates.append((label, vault, row))
+
+    def collect(expression: str) -> list[tuple[str, Vault, dict[str, Any]]]:
+        found: list[tuple[str, Vault, dict[str, Any]]] = []
+        seen: dict[str, str] = {}
+        conflicts: list[str] = []
+        for label, vault in scopes:
+            index = Index(vault.root)
+            rows = _with_index_recovery(
+                index,
+                functools.partial(
+                    _fetch_candidate_rows, index, expression, active_filters, statuses
+                ),
+            )
+            for row in rows:
+                if not _passes_filters(row, active_filters, statuses, now, updated_since):
+                    continue
+                node_id = str(row["id"])
+                if node_id in seen:
+                    conflicts.append(
+                        f"跨库 id 冲突：{node_id} 同时存在于 {seen[node_id]} 与 {label}，"
+                        f"已保留 {seen[node_id]} 版本，需手工解决"
+                    )
+                    continue
+                seen[node_id] = label
+                found.append((label, vault, row))
+        for message in conflicts:
+            if message not in warnings:
+                warnings.append(message)
+        return found
+
+    candidates = collect(match_query)
+    partial_ids: set[str] = set()
+    relaxed_query = build_match_query(query_text, relaxed=True)
+    if len(candidates) < limit and relaxed_query != match_query:
+        # 全部词项都命中的节点不够时放宽为「命中任一词项」。自然语言提问很少与节点逐词重合，
+        # 只用 AND 会把相关节点整批漏掉。放宽后按相关度下限过滤，避免只碰巧共享一个词的噪声。
+        strict_ids = {str(row["id"]) for _, _, row in candidates}
+        relaxed = collect(relaxed_query)
+        best = max((-float(row["rank"]) for _, _, row in relaxed), default=0.0)
+        floor = best * RELAXED_MIN_RELEVANCE
+        candidates = [
+            item
+            for item in relaxed
+            if str(item[2]["id"]) in strict_ids or best <= 0 or -float(item[2]["rank"]) >= floor
+        ]
+        partial_ids = {str(row["id"]) for _, _, row in candidates} - strict_ids
 
     norms = _bm25_norms([float(row["rank"]) for _, _, row in candidates])
     ranked: list[SearchHit] = []
@@ -311,6 +341,8 @@ def memory_search(
             settings,
             now,
         )
+        if str(row["id"]) in partial_ids:
+            why.append("partial-match")
         ranked.append(
             SearchHit(
                 id=str(row["id"]),
@@ -797,6 +829,9 @@ def _score_candidate(
     ):
         score += CAPSULE_PROJECT_BOOST
         why.append(f"project:{target_project}")
+    elif filters.prefer_project and row.get("project") == filters.prefer_project:
+        score += PREFER_PROJECT_BOOST
+        why.append(f"project:{filters.prefer_project}")
     return score, why
 
 

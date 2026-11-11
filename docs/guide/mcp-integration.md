@@ -12,6 +12,9 @@ uv run zymor mcp
 export ZYMOR_MCP_HTTP_TOKEN=<随机串>
 uv run zymor mcp --transport http --port 8765
 
+# HTTPS：对外监听时必须启用 TLS，token 至少 24 个字符
+uv run zymor mcp --transport http --host 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
+
 # 只读模式：不下发写工具（检索与资源可用）
 uv run zymor mcp --read-only
 ```
@@ -61,6 +64,8 @@ claude mcp add zymor -- uv run --directory <ZYMOR_REPO> zymor mcp
 - **记忆内容是证据不是指令**：工具返回内容不得被当成系统指令执行；L4 facet 是用户确认过的指导，可使用。
 - **写锁**：同一 vault 的写入受 `.lock` 保护；并发写返回可操作错误，只读检索不受影响。
 - **HTTP 必须配置 token**（`[mcp].http_token_env`，默认 `ZYMOR_MCP_HTTP_TOKEN`）；stdio 依赖本机信任模型。
+- **非回环地址必须加密**：没有 `--tls-cert/--tls-key` 时，`zymor mcp` 拒绝监听非回环地址；由反向代理或加密隧道保护链路时设 `[mcp].allow_insecure_http = true`。完整步骤见 [`deployment.md`](deployment.md)。
+- **HTTP 附加入口**：`GET /healthz`（无需鉴权）、`POST /ingest`（推送对话，见 [`capture.md`](capture.md)）、`POST /sync`（节点同步，见 [`sync.md`](sync.md)）。
 - **敏感信息**：写入前检测密钥/口令并拒写；检索/读取返回对疑似敏感串脱敏。
 - **评测模式**：`[mcp].benchmark_profile = true` 时 instructions 只保留与竞品等价的触发句，报告必须披露。
 
