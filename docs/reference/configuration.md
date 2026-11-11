@@ -63,7 +63,7 @@
 | --- | --- | --- |
 | `allow_tool_trigger` | `true` | 是否允许 MCP 工具 `memory_dream` 触发做梦 |
 | `auto_after_close` | `false` | `memory_close` 之后是否自动运行 NREM 与仲裁 |
-| `auto_after_ingest_events` | 0 | HTTP 服务累计收到多少条新对话后自动提炼一次；0 表示关闭 |
+| `auto_after_ingest_events` | 200 | HTTP 服务累计收到多少条新对话后自动提炼一次；0 表示关闭 |
 | `auto_min_interval_minutes` | 30 | 两次自动提炼的最小间隔 |
 | `auto_max_runs_per_day` | 12 | 每天自动提炼的次数上限 |
 | `batch_events` | 200 | 每次提取调用处理的事件数 |

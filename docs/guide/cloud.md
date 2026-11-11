@@ -18,16 +18,16 @@
 按 [`deployment.md`](deployment.md) 完成。云端模式另外要求两点：
 
 - 服务器配置了 LLM（`[llm.models].default`），否则对话只会堆在 L0，不会变成知识。
-- 提炼要有人触发。在服务器的配置里打开按量自动做梦，或者用 cron，两者可以同时用：
+- 提炼由按量自动做梦触发，默认开启。也可以再加一条 cron，两者可以同时用。默认值如下，可以在服务器的配置里调整：
 
 ```toml
 [dream]
-auto_after_ingest_events = 200     # 新对话累计 200 条后自动提炼一次；0 表示关闭（默认）
+auto_after_ingest_events = 200     # 新对话累计 200 条后自动提炼一次；0 表示关闭
 auto_min_interval_minutes = 30     # 两次自动提炼的最小间隔
 auto_max_runs_per_day = 12         # 每天自动提炼的次数上限
 ```
 
-自动做梦的计数在服务进程重启后归零。每次提炼仍受 `[dream.budget]` 限制。
+自动做梦的计数在服务进程重启后归零。每次提炼受 `[dream.budget]` 限制：默认每次最多 100 次 LLM 调用、2 美元、200 万 token。按默认值，自动提炼每天最多 12 次。模型没有配置单价时 2 美元的上限不生效，只有 token 上限生效，见 [`dream.md`](dream.md)。
 
 ## 2. 接入一台电脑
 

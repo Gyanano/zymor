@@ -80,7 +80,7 @@ DEFAULTS: dict[str, Any] = {
     "dream": {
         "allow_tool_trigger": True,
         "auto_after_close": False,
-        "auto_after_ingest_events": 0,
+        "auto_after_ingest_events": 200,
         "auto_min_interval_minutes": 30,
         "auto_max_runs_per_day": 12,
         "batch_events": 200,

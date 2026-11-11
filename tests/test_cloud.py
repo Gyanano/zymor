@@ -350,7 +350,9 @@ def test_auto_dream_fires_once_per_threshold_and_respects_limits(
 
     monkeypatch.setattr("zymor.dream.engine.run_dream", fake_run)
     config = Config()
-    assert AutoDreamer(server, config).notify(10_000) is False  # 默认关闭
+    assert AutoDreamer(server, config).threshold == 200  # 默认开启
+    config.data["dream"]["auto_after_ingest_events"] = 0
+    assert AutoDreamer(server, config).notify(10_000) is False  # 设为 0 关闭
 
     config.data["dream"]["auto_after_ingest_events"] = 5
     dreamer = AutoDreamer(server, config)

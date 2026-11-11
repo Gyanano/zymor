@@ -22,7 +22,7 @@ class AutoDreamer:
     def __init__(self, vault: Vault, config: Config) -> None:
         self.vault = vault
         self.config = config
-        self.threshold = int(config.get("dream.auto_after_ingest_events", 0) or 0)
+        self.threshold = int(config.get("dream.auto_after_ingest_events", 200) or 0)
         self.min_interval_s = float(config.get("dream.auto_min_interval_minutes", 30)) * 60
         self.max_per_day = int(config.get("dream.auto_max_runs_per_day", 12))
         self._lock = threading.Lock()

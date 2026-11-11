@@ -102,7 +102,7 @@ curl https://memory.example.com/healthz          # {"status":"ok"}，不需要 t
 
 ## 4. 定时做梦
 
-没有常驻的做梦进程。用 cron 触发，或者打开按量自动做梦（`dream.auto_after_ingest_events`，见 [`cloud.md`](cloud.md)）：
+HTTP 服务每累计收到 200 条新对话，就自动提炼一次（`dream.auto_after_ingest_events`，见 [`cloud.md`](cloud.md)）。对话不经 `/ingest` 进入的库不会触发它，需要用 cron：
 
 ```cron
 0 4 * * * . /etc/zymor/env && /usr/local/bin/zymor dream >> /var/log/zymor-dream.log 2>&1

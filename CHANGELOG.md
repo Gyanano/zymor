@@ -11,7 +11,7 @@
 - 云端模式：`zymor connect <地址> [--claude-code]` 把本机接到服务器并安装钩子；`zymor hook capture` 在配置了服务器时上传对话（带来源项目，失败后自动补传）；新增 `zymor hook recall`，每条用户消息按内容取回相关记忆；`zymor hook context` 在配置了服务器时从服务器取启动上下文。`[remote].exclude` 与项目级 `[remote]` 配置可按目录关闭上传与注入。
 - HTTP 入口 `POST /recall` 与 `POST /context`；`POST /ingest` 接受 `project`。
 - 自动召回的相关性门槛（`[recall]`）：只注入与消息足够相关的记忆，同一会话不重复注入。
-- 按量自动做梦：`dream.auto_after_ingest_events`、`auto_min_interval_minutes`、`auto_max_runs_per_day`（默认关闭）。
+- 按量自动做梦：HTTP 服务每累计收到 200 条新对话自动提炼一次，默认开启；`dream.auto_after_ingest_events`（设为 0 关闭）、`auto_min_interval_minutes`、`auto_max_runs_per_day`。
 - `zymor sync mirror`：把服务器的库下载成本地只读 Markdown 副本。
 - 检索支持 `prefer_project`：来源项目相同的节点加分，不过滤其他项目。
 - 云端同步：`zymor sync [status|push|pull]` 与服务端 `POST /sync`。本地库是事实源，远端按分区保存文件副本；按 sha256 增量传输；多台电脑同步到同一分区后互相补齐；主动删除通过删除标记传播；冲突不自动覆盖。`--include-events` 可额外备份 L0（只上传）。
