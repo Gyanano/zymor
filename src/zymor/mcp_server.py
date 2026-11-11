@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -94,6 +95,7 @@ MAX_INGEST_BYTES = 2 * 1024 * 1024
 MAX_INGEST_MESSAGES = 2000
 MAX_QUERY_BYTES = 64 * 1024
 MAX_RECENT_BATCHES = 4096
+INGEST_LOCK_RETRIES = 5
 _RECENT_BATCHES: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _BATCH_LOCK = threading.Lock()
 
@@ -629,10 +631,18 @@ def ingest_payload(vault: Vault, payload: Any) -> tuple[int, dict[str, Any]]:
         if previous is not None:
             # 客户端没收到上一次的回复而重发了同一批：不重复写入。
             return 200, {**previous, "captured": 0, "duplicate": True}
-    try:
-        result = ingest_messages(vault, session_id, messages, project=payload.get("project"))
-    except ZymorError as error:
-        return 409 if error.kind == "locked" else 400, error.to_dict()
+    result = None
+    for attempt in range(INGEST_LOCK_RETRIES):
+        try:
+            result = ingest_messages(vault, session_id, messages, project=payload.get("project"))
+            break
+        except ZymorError as error:
+            # 写入锁只在别的写入落盘的瞬间被占用（包括后台做梦写节点），稍等再试。
+            if error.kind == "locked" and attempt < INGEST_LOCK_RETRIES - 1:
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            return 409 if error.kind == "locked" else 400, error.to_dict()
+    assert result is not None
     body = result.to_dict()
     if batch_key is not None:
         with _BATCH_LOCK:

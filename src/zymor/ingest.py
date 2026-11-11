@@ -347,8 +347,9 @@ def ingest_transcript(
     session_id: str | None = None,
     fmt: str = "auto",
     include_tools: bool = False,
+    project: str | None = None,
 ) -> IngestResult:
-    """入参：vault、对话记录文件、可选会话与格式。出参：导入结果。
+    """入参：vault、对话记录文件、可选会话、格式与来源项目。出参：导入结果。
 
     只导入上次导入之后新增的完整行，重复调用不产生重复事件。
     """
@@ -376,6 +377,10 @@ def ingest_transcript(
             path=key, session_id=final_session, format=scan.format, skipped=scan.skipped
         )
         items = scan.items
+        slug = safe_project(project)
+        if slug is not None:
+            for item in items:
+                item.meta["project"] = slug
         if items:
             written = append_events(
                 vault.l0_dir,
@@ -489,10 +494,15 @@ def ingest_hook_payload(vault: Vault, payload: dict[str, Any]) -> IngestResult |
     path = Path(raw_path).expanduser()
     if not path.is_file():
         return None
+    from zymor.remote import project_name
+
     session = payload.get("session_id")
+    raw_cwd = payload.get("cwd")
     return ingest_transcript(
         vault,
         path,
         session_id=session if isinstance(session, str) and session else None,
         fmt="claude-code",
+        # 与云端上传一致：事件带上来源项目，做梦时节点才有项目归属。
+        project=project_name(Path(raw_cwd)) if isinstance(raw_cwd, str) and raw_cwd else None,
     )
