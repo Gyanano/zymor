@@ -263,6 +263,9 @@ PROJECT_ALLOWED: dict[str, tuple[str, ...]] = {
     # 服务监听在哪、要不要 TLS、用哪个环境变量当 token，也不能由仓库决定；
     # 否则在克隆下来的目录里启动 `zymor mcp` 就可能把服务明文暴露到公网。
     "mcp": ("mode", "instructions_max_chars", "resources", "prompts", "benchmark_profile"),
+    # 项目可以指定自己的项目库位置，但不能把「用户库」换成仓库里自带的库：
+    # 用户库里的 verified L4 会被当作用户确认过的偏好注入会话。
+    "vault": ("path",),
 }
 
 

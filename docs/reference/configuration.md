@@ -5,6 +5,7 @@
 项目目录可能来自别人的仓库，所以项目级配置里以下键不生效，只能写在用户级配置或环境变量里：
 
 - `[remote]` 的全部键，`upload = false` 与 `inject = false` 除外；
+- `vault.global_path`；
 - `[sync]` 的全部键，`scope` 除外；
 - `[mcp]` 里决定监听地址、TLS、token 与 HTTP 入口的键（`transport`、`host`、`port`、`http_token_env`、`tls_cert`、`tls_key`、`public_url`、`allowed_hosts`、`allow_insecure_http`、`ingest_endpoint`、`sync_endpoint`）；
 - `llm.base_url`、`llm.api_key_env`、`[llm.roles.<角色>]` 下的这两个键；

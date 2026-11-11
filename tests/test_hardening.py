@@ -786,3 +786,10 @@ def test_project_config_cannot_expose_the_mcp_server(tmp_path: Path, isolated_ho
     assert config.get("mcp.http_token_env") == "ZYMOR_MCP_HTTP_TOKEN"
     assert config.get("mcp.public_url") is None
     assert config.get("mcp.mode") == "ro"  # 不涉及网络暴露的设置仍可按项目配置
+
+    (repo / ".zymor" / "config.toml").write_text(
+        '[vault]\nglobal_path = "./planted"\npath = ".zymor/vault"\n', encoding="utf-8"
+    )
+    vault_config = load_config(repo)
+    assert vault_config.get("vault.global_path") == "~/.zymor/vault"
+    assert vault_config.get("vault.path") == ".zymor/vault"
