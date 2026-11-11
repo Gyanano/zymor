@@ -6,6 +6,7 @@
 
 - `[remote]` 的全部键，`upload = false` 与 `inject = false` 除外；
 - `[sync]` 的全部键，`scope` 除外；
+- `[mcp]` 里决定监听地址、TLS、token 与 HTTP 入口的键（`transport`、`host`、`port`、`http_token_env`、`tls_cert`、`tls_key`、`public_url`、`allowed_hosts`、`allow_insecure_http`、`ingest_endpoint`、`sync_endpoint`）；
 - `llm.base_url`、`llm.api_key_env`、`[llm.roles.<角色>]` 下的这两个键；
 - `embedding.base_url`、`embedding.api_key_env`。
 

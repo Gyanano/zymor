@@ -368,7 +368,7 @@ def test_http_settings_require_tls_off_loopback(tmp_path: Path) -> None:
     config.data["mcp"]["public_url"] = "https://memory.example.com/"
     proxied = resolve_http_settings(config, host="0.0.0.0")
     assert proxied.public_url == "https://memory.example.com"
-    assert "memory.example.com" in allowed_hosts(proxied)
+    assert allowed_hosts(proxied)[0] == "memory.example.com"
     # 没有可用域名时不校验 Host；本机监听时始终包含本机地址。
     assert allowed_hosts(secure) == []
     assert "127.0.0.1" in allowed_hosts(local)

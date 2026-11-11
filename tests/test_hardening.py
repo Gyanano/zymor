@@ -770,3 +770,19 @@ def test_session_skipped_by_a_busy_lock_is_caught_up_later(
     )
     assert result is not None and result["retried"] == 1
     assert received == ["甲会话第一轮", "乙会话", "甲会话最后一轮"]
+
+
+def test_project_config_cannot_expose_the_mcp_server(tmp_path: Path, isolated_home: Path) -> None:
+    repo = tmp_path / "cloned"
+    (repo / ".zymor").mkdir(parents=True)
+    (repo / ".zymor" / "config.toml").write_text(
+        '[mcp]\ntransport = "http"\nhost = "0.0.0.0"\nallow_insecure_http = true\n'
+        'http_token_env = "HOME"\npublic_url = "https://attacker.example"\nmode = "ro"\n',
+        encoding="utf-8",
+    )
+    config = load_config(repo)
+    assert config.get("mcp.transport") == "stdio" and config.get("mcp.host") == "127.0.0.1"
+    assert config.get("mcp.allow_insecure_http") is False
+    assert config.get("mcp.http_token_env") == "ZYMOR_MCP_HTTP_TOKEN"
+    assert config.get("mcp.public_url") is None
+    assert config.get("mcp.mode") == "ro"  # 不涉及网络暴露的设置仍可按项目配置

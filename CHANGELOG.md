@@ -24,6 +24,7 @@
 ### Security
 
 - 项目目录里的 `.zymor/config.toml` 不能再设置 `[remote]` 与 `[sync]` 的服务器地址、token 位置、证书等键；它只能关闭本项目的上传与注入，或改同步分区名。否则，克隆下来的仓库可以借此把对话和 token 发往任意地址。
+- **行为变化**：项目级配置里 `[mcp]` 的监听地址、TLS、token 与 HTTP 入口相关的键被忽略；`mode`、`resources`、`prompts` 等仍可按项目配置。
 - **行为变化**：项目级配置里的 `llm.base_url`、`llm.api_key_env`、`[llm.roles.*]` 的同名键，以及 `embedding.base_url`、`embedding.api_key_env` 同样被忽略，原因相同（带着 API key 的请求发到哪里，不能由仓库决定）。这几项请写在 `~/.zymor/config.toml` 或环境变量里。模型名等其余设置仍可按项目配置。
 - 同步：远端的删除标记不会删除本地的 L0；一次删除超过本地一半节点时拒绝执行；`zymor sync mirror` 拒绝以一个库为目标，服务器返回空清单时不清空副本；同步路径与分区名改用完整匹配。
 - 服务端边读边限制请求体大小；`zymor connect` 写入前重新解析配置，无法安全修改时拒绝写入；token 文件以 600 新建，不沿用旧权限；钩子命令路径加引号；钩子捕获所有异常。

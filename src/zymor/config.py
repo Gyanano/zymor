@@ -260,6 +260,9 @@ def _set_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
 PROJECT_ALLOWED: dict[str, tuple[str, ...]] = {
     "remote": ("upload", "inject"),
     "sync": ("scope",),
+    # 服务监听在哪、要不要 TLS、用哪个环境变量当 token，也不能由仓库决定；
+    # 否则在克隆下来的目录里启动 `zymor mcp` 就可能把服务明文暴露到公网。
+    "mcp": ("mode", "instructions_max_chars", "resources", "prompts", "benchmark_profile"),
 }
 
 
