@@ -1,14 +1,19 @@
 {
   "hooks": {
     "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/absolute/path/to/zymor/integrations/claude-code/session-start.sh"
-          }
-        ]
-      }
+      { "hooks": [{ "type": "command", "command": "zymor hook context" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "zymor hook recall" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "zymor hook capture" }] }
+    ],
+    "PreCompact": [
+      { "hooks": [{ "type": "command", "command": "zymor hook capture" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "zymor hook capture" }] }
     ]
   }
 }

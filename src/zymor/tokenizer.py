@@ -110,8 +110,11 @@ def tokenize_text(text: str) -> str:
     return " ".join(tokenize_terms(text))
 
 
-def build_match_query(query: str) -> str:
-    """入参：用户查询。出参：FTS5 MATCH 表达式；标识符同时匹配原词与子词。"""
+def build_match_query(query: str, *, relaxed: bool = False) -> str:
+    """入参：用户查询与是否放宽。出参：FTS5 MATCH 表达式；标识符同时匹配原词与子词。
+
+    默认要求全部词项命中；`relaxed=True` 时命中任一词项即可，由 bm25 负责把命中多的排前面。
+    """
     terms = tokenize_terms(query)
     covered: set[str] = set()
     for term in terms:
@@ -130,7 +133,7 @@ def build_match_query(query: str) -> str:
             groups.append(f'("{term}" OR ({alternatives}))')
         else:
             groups.append(f'"{term}"')
-    return " AND ".join(groups)
+    return (" OR " if relaxed else " AND ").join(groups)
 
 
 def estimate_tokens(text: str) -> int:

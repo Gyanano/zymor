@@ -11,11 +11,13 @@ from zymor.model.node import MemoryNode
 from zymor.store.index import Index
 from zymor.store.nodes import read_node
 from zymor.tokenizer import estimate_tokens
+from zymor.util.fs import sha256_hex
 from zymor.vault import Vault
 
 DEFAULT_MODEL = "text-embedding-3-small"
 DEFAULT_MIN_SCORE = 0.2
 DEFAULT_BATCH_SIZE = 64
+RRF_K = 60
 MAX_EMBED_CHARS = 6000
 
 
@@ -129,8 +131,15 @@ def build_embeddings(
     """入参：vault、配置与可选客户端。出参：写入的向量数。为节点构建向量索引。"""
     settings = EmbeddingSettings.from_config(config)
     embedding_client = client or OpenAIEmbeddingClient(settings)
-    nodes = _all_nodes(vault)
     index = Index(vault.root)
+    known = index.embedding_hashes(settings.model)
+    # 只为新增或内容变过的节点重新计算向量。判断依据是被向量化文本的哈希，
+    # 不是 updated_at：很多改动（update_node、手工编辑、同步下来的节点）不会推进 updated_at。
+    nodes = [
+        node
+        for node in _all_nodes(vault)
+        if known.get(node.id) != sha256_hex(node_embedding_text(node))
+    ]
     batch_size = int(config.get("embedding.batch_size", DEFAULT_BATCH_SIZE))
     written = 0
     for start in range(0, len(nodes), batch_size):
@@ -139,7 +148,9 @@ def build_embeddings(
         if len(vectors) != len(batch):
             raise EmbeddingError("向量数量与节点数量不一致")
         for node, vector in zip(batch, vectors, strict=True):
-            index.upsert_embedding(node.id, settings.model, vector)
+            index.upsert_embedding(
+                node.id, settings.model, vector, sha256_hex(node_embedding_text(node))
+            )
             written += 1
     return written
 
@@ -166,24 +177,28 @@ def semantic_search(
         except ZymorError as error:
             warnings.append(f"{label}: {error.message}")
             continue
-        for row in rows:
-            try:
-                node, _ = read_node(vault, str(row["node_id"]))
-            except ZymorError:
-                continue
-            if node.status == "deprecated":
-                continue
-            score = cosine(query_vector, row["vector"])
-            if score < settings.min_score:
+        scored = [(cosine(query_vector, row["vector"]), str(row["node_id"])) for row in rows]
+        scored = [item for item in scored if item[0] >= settings.min_score]
+        scored.sort(reverse=True)
+        # 元数据从索引批量取，且只取排在前面的候选，不再逐个读节点文件。
+        shortlist = scored[: max(top_k * 4, 32)]
+        try:
+            metadata = index.nodes_by_ids([node_id for _, node_id in shortlist])
+        except ZymorError as error:
+            warnings.append(f"{label}: {error.message}")
+            continue
+        for score, node_id in shortlist:
+            row_meta = metadata.get(node_id)
+            if row_meta is None or str(row_meta.get("status")) == "deprecated":
                 continue
             hits.append(
                 {
-                    "id": node.id,
-                    "title": node.title,
-                    "summary": node.summary,
-                    "status": node.status,
-                    "layer": node.layer,
-                    "category": node.category,
+                    "id": node_id,
+                    "title": str(row_meta.get("title") or ""),
+                    "summary": str(row_meta.get("summary") or ""),
+                    "status": str(row_meta.get("status") or ""),
+                    "layer": str(row_meta.get("layer") or ""),
+                    "category": str(row_meta.get("category") or ""),
                     "scope": label,
                     "score": round(score, 6),
                 }
@@ -229,6 +244,14 @@ def hybrid_search(
         top_k=top_k,
         token_budget=token_budget,
     )
+    # 词法综合分与余弦相似度量纲不同，不能直接比大小；按各自名次做倒数排名融合（RRF）。
+    fused: dict[str, float] = {}
+    for rank, hit in enumerate(lexical.hits, start=1):
+        fused[hit.id] = fused.get(hit.id, 0.0) + 1.0 / (RRF_K + rank)
+    for rank, semantic_hit in enumerate(semantic["hits"], start=1):
+        node_id = str(semantic_hit["id"])
+        fused[node_id] = fused.get(node_id, 0.0) + 1.0 / (RRF_K + rank)
+    best = 2.0 / (RRF_K + 1)
     merged: dict[str, dict[str, Any]] = {}
     for hit in lexical.hits:
         merged[hit.id] = {
@@ -240,7 +263,8 @@ def hybrid_search(
             "category": hit.category,
             "scope": hit.scope,
             "path": hit.path,
-            "score": hit.score,
+            "score": round(fused[hit.id] / best, 6),
+            "lexical_score": hit.score,
             "why": list(hit.why),
             "stale": hit.stale,
             "stale_reasons": list(hit.stale_reasons),
@@ -249,11 +273,13 @@ def hybrid_search(
         node_id = str(semantic_hit["id"])
         if node_id in merged:
             current = merged[node_id]
-            current["score"] = max(float(current["score"]), float(semantic_hit["score"]))
+            current["semantic_score"] = float(semantic_hit["score"])
             current["why"].append("semantic")
             continue
         merged[node_id] = {
             **semantic_hit,
+            "score": round(fused[node_id] / best, 6),
+            "semantic_score": float(semantic_hit["score"]),
             "path": "",
             "why": ["semantic"],
             "stale": False,

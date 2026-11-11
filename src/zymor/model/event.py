@@ -119,8 +119,9 @@ def append_event(
     *,
     ts: str | None = None,
     seq: int | None = None,
+    floor: int = 0,
 ) -> EventEntry:
-    """入参：L0 目录、会话、类型、内容，可选 caller 时间与 seq。出参：追加的事件。"""
+    """入参：L0 目录、会话、类型、内容，可选时间、seq 与 seq 下限。出参：追加的事件。"""
     if kind not in EVENT_KINDS:
         raise ValidationError(
             f"未知事件类型: {kind}", field="kind", hint=f"可选：{', '.join(EVENT_KINDS)}"
@@ -136,7 +137,7 @@ def append_event(
     moment = parse_iso(ts) if ts is not None else None
     target = l0_path(l0_dir, moment)
     target.parent.mkdir(parents=True, exist_ok=True)
-    highest = max_session_seq(l0_dir, session_id)
+    highest = max(max_session_seq(l0_dir, session_id), floor)
     assigned = seq if seq is not None and seq > highest else highest + 1
     entry = EventEntry(
         schema_version=1,
@@ -152,6 +153,57 @@ def append_event(
         handle.write(line + "\n")
         handle.flush()
     return entry
+
+
+def append_events(
+    l0_dir: Path,
+    session_id: str,
+    items: list[tuple[str, str, dict[str, Any] | None, str | None]],
+    *,
+    floor: int = 0,
+) -> list[EventEntry]:
+    """入参：L0 目录、会话与 (kind, content, meta, ts) 列表。出参：追加的事件。
+
+    批量追加只扫描一次已有 seq，供对话导入使用。
+    """
+    if not is_session_id(session_id):
+        raise ValidationError("非法会话标识", field="session_id")
+    if not items:
+        return []
+    highest = max(max_session_seq(l0_dir, session_id), floor)
+    lines_by_file: dict[Path, list[str]] = {}
+    entries: list[EventEntry] = []
+    for kind, content, meta, ts in items:
+        if kind not in EVENT_KINDS:
+            raise ValidationError(
+                f"未知事件类型: {kind}", field="kind", hint=f"可选：{', '.join(EVENT_KINDS)}"
+            )
+        stamp = ts if ts is not None and is_iso(ts) else None
+        entry_meta = dict(meta or {})
+        clipped, truncated = _truncate_content(content)
+        if truncated:
+            entry_meta["truncated"] = True
+        highest += 1
+        entry = EventEntry(
+            schema_version=1,
+            ts=stamp or now_iso(),
+            session_id=session_id,
+            seq=highest,
+            kind=cast(EventKind, kind),
+            content=clipped,
+            meta=entry_meta,
+        )
+        target = l0_path(l0_dir, parse_iso(stamp) if stamp is not None else None)
+        lines_by_file.setdefault(target, []).append(
+            json.dumps(entry.model_dump(), ensure_ascii=False, separators=(",", ":"))
+        )
+        entries.append(entry)
+    for target, lines in lines_by_file.items():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+    return entries
 
 
 def iter_events(target: Path) -> Iterator[EventEntry]:

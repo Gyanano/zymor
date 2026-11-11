@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import ValidationError as PydanticValidationError
 
 from zymor.config import Config
+from zymor.dream.state import seq_floor
 from zymor.errors import NotFoundError, UserError, ValidationError, ZymorError
 from zymor.llm import JsonChatClient
 from zymor.model.event import EVENT_KINDS, append_event
@@ -1613,7 +1614,16 @@ def memory_log(
         raise ValidationError("seq 必须是整数", field="seq")
     try:
         with vault.writing("log"):
-            entry = append_event(vault.l0_dir, session_id, kind, content, meta, ts=ts, seq=seq)
+            entry = append_event(
+                vault.l0_dir,
+                session_id,
+                kind,
+                content,
+                meta,
+                ts=ts,
+                seq=seq,
+                floor=seq_floor(vault, session_id),
+            )
     except OSError as error:
         raise UserError(f"L0 追加失败：{error}", hint="检查磁盘空间与文件权限后重试") from error
     warnings: list[str] = []

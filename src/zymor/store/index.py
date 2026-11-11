@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS embeddings(
   model TEXT NOT NULL,
   dim INTEGER NOT NULL,
   vector BLOB NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  content_hash TEXT
 );
 CREATE INDEX IF NOT EXISTS embeddings_model_idx ON embeddings(model);
 """
@@ -681,25 +682,35 @@ class Index:
             "links": links,
         }
 
-    def upsert_embedding(self, node_id: str, model: str, vector: list[float]) -> None:
-        """入参：节点 id、模型名与向量。出参：无。写入或覆盖该节点的向量。"""
+    def _ensure_embedding_hash(self, connection: sqlite3.Connection) -> None:
+        """旧版本建的 embeddings 表没有 content_hash 列；补上它，已有的向量保留。"""
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(embeddings)")}
+        if "content_hash" not in columns:
+            connection.execute("ALTER TABLE embeddings ADD COLUMN content_hash TEXT")
+
+    def upsert_embedding(
+        self, node_id: str, model: str, vector: list[float], content_hash: str | None = None
+    ) -> None:
+        """入参：节点 id、模型名、向量与被向量化文本的哈希。出参：无。写入或覆盖该节点的向量。"""
         if not vector:
             raise ValidationError("向量不能为空", field="vector")
         self.ensure()
         payload = array("f", [float(value) for value in vector]).tobytes()
         try:
             with self.connect() as connection:
+                self._ensure_embedding_hash(connection)
                 connection.execute(
                     """
-                    INSERT INTO embeddings(node_id, model, dim, vector, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO embeddings(node_id, model, dim, vector, updated_at, content_hash)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(node_id) DO UPDATE SET
                       model = excluded.model,
                       dim = excluded.dim,
                       vector = excluded.vector,
-                      updated_at = excluded.updated_at
+                      updated_at = excluded.updated_at,
+                      content_hash = excluded.content_hash
                     """,
-                    (node_id, model, len(vector), payload, now_iso()),
+                    (node_id, model, len(vector), payload, now_iso(), content_hash),
                 )
         except sqlite3.Error as error:
             raise IndexFailure(f"向量写入失败: {error}") from error
@@ -731,6 +742,19 @@ class Index:
                 }
             )
         return results
+
+    def embedding_hashes(self, model: str) -> dict[str, str | None]:
+        """入参：模型名。出参：节点 id 到被向量化文本哈希的映射（旧数据的哈希为 None）。"""
+        self.ensure()
+        try:
+            with self.connect() as connection:
+                self._ensure_embedding_hash(connection)
+                rows = connection.execute(
+                    "SELECT node_id, content_hash FROM embeddings WHERE model = ?", (model,)
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise IndexFailure(f"向量读取失败: {error}") from error
+        return {str(row["node_id"]): row["content_hash"] for row in rows}
 
     def embedding_count(self, model: str | None = None) -> int:
         """入参：可选模型名。出参：已写入向量的节点数。"""

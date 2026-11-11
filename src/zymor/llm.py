@@ -133,12 +133,19 @@ def resolve_role(config: Config, role: str) -> RoleSettings:
     role_section = config.get(f"llm.roles.{role}", {})
     if not isinstance(role_section, dict):
         role_section = {}
-    model = role_section.get("model") or config.get(f"llm.models.{role}", None)
+    model = (
+        role_section.get("model")
+        or config.get(f"llm.models.{role}", None)
+        or config.get("llm.models.default", None)
+    )
     if not model:
         raise LlmError(
             f"角色 {role} 未配置模型",
             retryable=False,
-            hint=f"在配置中设置 [llm.models].{role} 或 [llm.roles.{role}].model",
+            hint=(
+                f"在配置中设置 [llm.models].default（所有角色共用），"
+                f"或 [llm.models].{role} / [llm.roles.{role}].model"
+            ),
         )
     base_url = str(role_section.get("base_url") or config.get("llm.base_url"))
     api_key_env = str(role_section.get("api_key_env") or config.get("llm.api_key_env"))

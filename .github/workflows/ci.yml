@@ -36,4 +36,4 @@ jobs:
       - name: Mypy
         run: uv run mypy src/zymor
       - name: Smoke tests
-        run: uv run pytest tests/test_open_smoke.py -q
+        run: uv run pytest -q

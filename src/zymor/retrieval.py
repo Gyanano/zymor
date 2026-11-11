@@ -56,9 +56,11 @@ STATUS_BOOSTS: dict[str, float] = {
 DEFAULT_TOP_K = 8
 TOP_K_MAX = 50
 CANDIDATE_LIMIT = 100
+RELAXED_MIN_RELEVANCE = 0.35
 HIT_REFERENCE = 50.0
 FACET_BOOST = 0.10
 CAPSULE_PROJECT_BOOST = 0.05
+PREFER_PROJECT_BOOST = 0.08
 PROJECT_SCOPE_BOOST = 0.10
 TRUNCATION_MARKER = "…（已截断）"
 CATALOG_LINE_RE = re.compile(
@@ -75,6 +77,8 @@ class SearchFilters:
     statuses: list[str] | None = None
     tags: list[str] | None = None
     project: str | None = None
+    # prefer_project 只加分不过滤：来源项目相同的节点排前面，别的项目的知识仍然能被找到。
+    prefer_project: str | None = None
     applies_to: list[str] | None = None
     updated_since: str | None = None
     valid_only: bool = True
@@ -277,28 +281,61 @@ def memory_search(
             ) from error
 
     now = utc_now()
-    candidates: list[tuple[str, Vault, dict[str, Any]]] = []
-    seen: dict[str, str] = {}
-    for label, vault in scopes:
-        index = Index(vault.root)
-        rows = _with_index_recovery(
-            index,
-            functools.partial(_fetch_candidate_rows, index, match_query, active_filters, statuses),
-        )
-        for row in rows:
-            if not _passes_filters(row, active_filters, statuses, now, updated_since):
-                continue
-            node_id = str(row["id"])
-            if node_id in seen:
-                warnings.append(
-                    f"跨库 id 冲突：{node_id} 同时存在于 {seen[node_id]} 与 {label}，"
-                    f"已保留 {seen[node_id]} 版本，需手工解决"
-                )
-                continue
-            seen[node_id] = label
-            candidates.append((label, vault, row))
 
-    norms = _bm25_norms([float(row["rank"]) for _, _, row in candidates])
+    def collect(expression: str) -> list[tuple[str, Vault, dict[str, Any]]]:
+        found: list[tuple[str, Vault, dict[str, Any]]] = []
+        seen: dict[str, str] = {}
+        conflicts: list[str] = []
+        for label, vault in scopes:
+            index = Index(vault.root)
+            rows = _with_index_recovery(
+                index,
+                functools.partial(
+                    _fetch_candidate_rows, index, expression, active_filters, statuses
+                ),
+            )
+            for row in rows:
+                if not _passes_filters(row, active_filters, statuses, now, updated_since):
+                    continue
+                node_id = str(row["id"])
+                if node_id in seen:
+                    conflicts.append(
+                        f"跨库 id 冲突：{node_id} 同时存在于 {seen[node_id]} 与 {label}，"
+                        f"已保留 {seen[node_id]} 版本，需手工解决"
+                    )
+                    continue
+                seen[node_id] = label
+                found.append((label, vault, row))
+        for message in conflicts:
+            if message not in warnings:
+                warnings.append(message)
+        return found
+
+    strict = collect(match_query)
+    extra: list[tuple[str, Vault, dict[str, Any]]] = []
+    relaxed_query = build_match_query(query_text, relaxed=True)
+    if len(strict) < limit and relaxed_query != match_query:
+        # 全部词项都命中的节点不够时，补充「命中任一词项」的节点。自然语言提问很少与节点逐词重合，
+        # 只用 AND 会把相关节点整批漏掉。补充的节点只追加在后面，不替换、不挤掉完全命中的结果。
+        strict_ids = {str(row["id"]) for _, _, row in strict}
+        relaxed = collect(relaxed_query)
+        # bm25 的数值只在同一个库内可比（小库的 idf 接近 0），相关度下限按库分别计算。
+        best_by_scope: dict[str, float] = {}
+        for label, _, row in relaxed:
+            best_by_scope[label] = max(best_by_scope.get(label, 0.0), -float(row["rank"]))
+        for item in relaxed:
+            label, _, row = item
+            if str(row["id"]) in strict_ids:
+                continue
+            best = best_by_scope[label]
+            if best <= 0 or -float(row["rank"]) >= best * RELAXED_MIN_RELEVANCE:
+                extra.append(item)
+    partial_ids = {str(row["id"]) for _, _, row in extra}
+    candidates = strict + extra
+    # 两组候选来自不同的查询，bm25 各自归一化。
+    norms = _bm25_norms([float(row["rank"]) for _, _, row in strict]) + _bm25_norms(
+        [float(row["rank"]) for _, _, row in extra]
+    )
     ranked: list[SearchHit] = []
     for (label, vault, row), bm25_norm in zip(candidates, norms, strict=True):
         score, why = _score_candidate(
@@ -311,6 +348,8 @@ def memory_search(
             settings,
             now,
         )
+        if str(row["id"]) in partial_ids:
+            why.append("partial-match")
         ranked.append(
             SearchHit(
                 id=str(row["id"]),
@@ -327,7 +366,10 @@ def memory_search(
                 updated_at=str(row["updated_at"]),
             )
         )
-    ranked.sort(key=lambda hit: (-hit.score, -_updated_timestamp(hit.updated_at)))
+    # 完全命中的结果永远排在部分命中的前面。
+    ranked.sort(
+        key=lambda hit: (hit.id in partial_ids, -hit.score, -_updated_timestamp(hit.updated_at))
+    )
     hits = ranked[:limit]
     costs = [estimate_tokens(_hit_line(hit)) for hit in hits]
     kept, truncated, tokens_estimate = _fit_costs(costs, budget)
@@ -797,6 +839,9 @@ def _score_candidate(
     ):
         score += CAPSULE_PROJECT_BOOST
         why.append(f"project:{target_project}")
+    elif filters.prefer_project and row.get("project") == filters.prefer_project:
+        score += PREFER_PROJECT_BOOST
+        why.append(f"project:{filters.prefer_project}")
     return score, why
 
 

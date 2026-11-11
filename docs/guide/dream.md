@@ -23,10 +23,24 @@ uv run zymor dream --watch --interval 300    # 可选：循环运行，Ctrl+C �
 
 | 阶段 | 输入 | 产出 |
 | --- | --- | --- |
-| NREM | 未消化 L0 事件、近期 hypothesis 节点 | 复发门控后的候选节点；四动作（new / append-evidence / supersede / conflict）；L2→L3 晋升；过期焦点补胶囊 |
+| NREM | 未消化 L0 事件、近期 hypothesis 节点、待定池 | 复发门控后的候选节点；四动作（new / append-evidence / supersede / conflict）；L2→L3 晋升；过期焦点补胶囊 |
 | 仲裁 | disputed 节点 + 晨间队列 | 四裁决（uphold-new / uphold-old / defer / unverifiable）；旧节点 Tombstone；队列 attempts/state |
 | REM | 近期 L2/L3 × 远期跨域 L3 | 共享可观察结构的同构洞察（L3 semantic hypothesis，confidence 0.3） |
 | 人格 | user_message 中的纠正/偏好/重复模式 | 满足「≥2 会话 + 用户确认」的 L4 facet；未确认规则进晨间队列（draft L4 hypothesis） |
+
+## 复发门控与待定池
+
+NREM 只把「出现过不止一次」的候选写成节点。判定规则：
+
+1. 候选与既有节点相关，或与同一批的另一个候选相关 → 进入巩固。
+2. 候选与待定池里来自别的事件的记录相关 → 两者合并后进入巩固，该记录移出待定池。
+3. 以上都不满足 → 候选写入待定池 `dream/pending.jsonl`，不生成节点。
+
+「相关」的门槛：标题加摘要的词项中，共享词项 ≥ 3 个，且共享数占较短一方的 40% 以上；双方有相同标签时放宽为 ≥ 2 个且 20% 以上。只共享一个词项不算相关。
+
+待定记录默认保留 90 天（`dream.pending_retention_days`），最多 500 条（`dream.pending_max`），超出时丢弃最旧的。`dream.eager_singletons = true` 时跳过门控，单次候选直接写成 hypothesis。
+
+同一批事件重跑时提取出的同一个候选，不算它自己的复发。
 
 ## 晨间追问
 
@@ -64,8 +78,11 @@ max_pairs = 3
 [dream.budget]
 max_llm_calls = 100
 max_usd = 2
+max_tokens = 2000000   # 输入加输出的 token 总量上限
 max_nodes_changed = 200
 ```
+
+`max_usd` 按 `[llm.pricing."<模型名>"]` 的单价估算费用。模型没有配置单价时费用按 0 计，`max_usd` 不会触发，此时由 `max_tokens` 限流；run 报告会给出一条提示并在 `budget.unpriced_calls` 里计数。
 
 空闲超过 `[lifecycle].capsule_downweight_after_days`（默认 30 天）的 L2 胶囊，每次真实 run 会把 arousal 乘一次 λ（下限 `arousal_min`），不推进 `updated_at`、不改状态。
 
@@ -78,7 +95,7 @@ max_nodes_changed = 200
 | `arbitration` | 失调裁决（建议强模型） |
 | `dream` | REM 联想与人格提炼 |
 
-配置见 `[llm.models]`；每个角色可用 `[llm.roles.<role>]` 覆盖 `model/base_url/api_key_env`。无通道时做梦不伪造结果。
+配置见 `[llm.models]`：`default` 是所有角色的兜底模型，只配这一项即可运行；也可以按角色单独指定。每个角色可用 `[llm.roles.<role>]` 覆盖 `model/base_url/api_key_env`。无通道时做梦不伪造结果。
 
 ## 失败与边界
 

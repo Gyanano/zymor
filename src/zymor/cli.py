@@ -14,6 +14,7 @@ from zymor import __version__
 from zymor.atlas import generate as generate_artifacts
 from zymor.config import Config, load_config
 from zymor.dream.engine import run_dream
+from zymor.dream.state import seq_floor
 from zymor.errors import NotFoundError, UsageError, ZymorError
 from zymor.maintenance import (
     confirm_persona_draft,
@@ -130,6 +131,32 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--ignore", action="append", default=[], help="额外忽略 glob（可重复）")
     capture.add_argument("--max-events", type=int, default=50, help="单轮最多写入事件数")
 
+    ingest = sub.add_parser("ingest", parents=[common], help="把对话记录增量导入 L0")
+    ingest.add_argument("paths", nargs="+", type=Path, help="对话记录文件或目录（.jsonl / .json）")
+    ingest.add_argument("--format", choices=("auto", "claude-code", "generic"), default="auto")
+    ingest.add_argument("--session", default=None, help="覆盖会话标识（只能配合单个文件）")
+    ingest.add_argument("--include-tools", action="store_true", help="同时导入工具调用与结果摘要")
+
+    sync = sub.add_parser("sync", parents=[common], help="与远端增量同步知识节点")
+    sync.add_argument(
+        "action",
+        nargs="?",
+        choices=("run", "push", "pull", "status", "mirror"),
+        default="run",
+        help="run=先拉后推（默认）；status 只显示差异；mirror=把服务器的库下载成本地只读副本",
+    )
+    sync.add_argument(
+        "--to", type=Path, default=None, help="mirror 的目标目录（默认 ~/.zymor/mirror）"
+    )
+    sync.add_argument("--global", dest="global_vault", action="store_true", help="同步用户库")
+    sync.add_argument("--scope", default=None, help="远端分区名（默认按库自动取）")
+    sync.add_argument(
+        "--force", action="store_true", help="冲突时以当前方向为准（需配合 push 或 pull）"
+    )
+    sync.add_argument(
+        "--include-events", action="store_true", help="同时备份 L0 原始事件（只上传）"
+    )
+
     index = sub.add_parser("index", parents=[common], help="索引维护")
     index_sub = index.add_subparsers(dest="index_command", required=True)
     index_sub.add_parser("sync", parents=[common], help="增量同步索引")
@@ -224,6 +251,29 @@ def build_parser() -> argparse.ArgumentParser:
     hook_context.add_argument("--project", default=None)
     hook_context.add_argument("--budget-tokens", type=int, default=None)
     hook_context.add_argument("--session-id", default=None)
+    hook_sub.add_parser(
+        "capture",
+        parents=[common],
+        help="读取宿主 Hook 的 stdin JSON，把新增对话上传到服务器或写入本地 L0",
+    )
+    hook_sub.add_parser(
+        "recall", parents=[common], help="读取宿主 Hook 的 stdin JSON，输出与本条消息相关的记忆"
+    )
+
+    connect = sub.add_parser("connect", parents=[common], help="把本机接到一台 Zymor 服务器")
+    connect.add_argument("url", help="服务器地址，如 https://memory.example.com")
+    connect.add_argument("--token-stdin", action="store_true", help="从标准输入读取 token")
+    connect.add_argument("--ca-file", default=None, help="自签证书的 CA 文件")
+    connect.add_argument("--no-verify", action="store_true", help="不测试连接就保存")
+    connect.add_argument(
+        "--claude-code", action="store_true", help="把钩子写入 Claude Code 的 settings.json"
+    )
+    connect.add_argument(
+        "--settings",
+        type=Path,
+        default=None,
+        help="settings.json 路径（默认 ~/.claude/settings.json）",
+    )
 
     panel = sub.add_parser("panel", parents=[common], help="启动只读记忆面板")
     panel.add_argument("--host", default="127.0.0.1")
@@ -232,6 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
     mcp = sub.add_parser("mcp", parents=[common], help="启动 MCP Server")
     mcp.add_argument("--transport", choices=("stdio", "http"), default=None)
     mcp.add_argument("--port", type=int, default=None)
+    mcp.add_argument("--host", default=None, help="HTTP 监听地址（默认 127.0.0.1）")
+    mcp.add_argument("--tls-cert", default=None, metavar="PEM", help="TLS 证书链文件")
+    mcp.add_argument("--tls-key", default=None, metavar="PEM", help="TLS 私钥文件")
     mcp.add_argument("--read-only", action="store_true", help="只读模式：不下发写工具")
 
     return parser
@@ -649,7 +702,13 @@ def cmd_read(args: argparse.Namespace) -> int:
 def cmd_log(args: argparse.Namespace) -> int:
     _, vault = _context(args)
     with vault.writing("log"):
-        entry = append_event(vault.l0_dir, args.session, args.kind, args.content)
+        entry = append_event(
+            vault.l0_dir,
+            args.session,
+            args.kind,
+            args.content,
+            floor=seq_floor(vault, args.session),
+        )
     payload = {
         "session_id": entry.session_id,
         "seq": entry.seq,
@@ -1060,9 +1119,239 @@ def cmd_panel(args: argparse.Namespace) -> int:
     return 0
 
 
+def _hook_capture(args: argparse.Namespace) -> int:
+    """Hook 永不让宿主失败：任何问题只写 stderr，退出码恒为 0。"""
+    from zymor.ingest import ingest_hook_payload
+    from zymor.remote import RemoteSettings, upload_hook_payload
+
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        cwd = payload.get("cwd")
+        start = Path(cwd) if isinstance(cwd, str) and Path(cwd).is_dir() else None
+        config = load_config(start)
+        settings = None if _flag(args, "vault", None) else RemoteSettings.from_config(config)
+        output: dict[str, Any] | None
+        if settings is not None:
+            # 配置了服务器：对话只上传，不写本地库。
+            output = upload_hook_payload(settings, payload)
+        else:
+            vault = resolve_vault(config, _flag(args, "vault", None), cwd=start)
+            result = ingest_hook_payload(vault, payload)
+            output = result.to_dict() if result is not None else None
+    except Exception as error:  # 钩子绝不能因为任何异常让宿主失败
+        message = error.message if isinstance(error, ZymorError) else str(error)
+        print(f"zymor hook capture 已跳过: {message}", file=sys.stderr)
+        return 0
+    if output is not None and _flag(args, "json_output"):
+        print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
+def _hook_stdin() -> dict[str, Any]:
+    raw = "" if sys.stdin.isatty() else sys.stdin.read()
+    payload = json.loads(raw) if raw.strip() else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _hook_recall(args: argparse.Namespace) -> int:
+    """每条用户消息触发一次：有相关记忆就输出，没有就什么都不输出。永不让宿主失败。"""
+    from zymor.recall import recall
+    from zymor.remote import RemoteSettings, project_name, recall_for_prompt
+
+    try:
+        preloaded = _flag(args, "hook_payload", None)
+        payload = preloaded if isinstance(preloaded, dict) else _hook_stdin()
+        cwd = payload.get("cwd")
+        start = Path(cwd) if isinstance(cwd, str) and Path(cwd).is_dir() else None
+        config = load_config(start)
+        settings = None if _flag(args, "vault", None) else RemoteSettings.from_config(config)
+        if settings is not None:
+            text = recall_for_prompt(settings, payload)
+        else:
+            prompt = payload.get("prompt")
+            if not isinstance(prompt, str) or prompt.strip().startswith("/"):
+                return 0
+            vault = resolve_vault(config, _flag(args, "vault", None), cwd=start)
+            text = recall(
+                _scopes(config, vault), prompt, config=config, project=project_name(start)
+            )["text"]
+    except Exception as error:  # 钩子绝不能因为任何异常让宿主失败
+        message = error.message if isinstance(error, ZymorError) else str(error)
+        print(f"zymor hook recall 已跳过: {message}", file=sys.stderr)
+        return 0
+    if text:
+        print(text)
+    return 0
+
+
+def _hook_context_remote(args: argparse.Namespace, config: Config) -> int | None:
+    """配置了服务器时从服务器取会话启动上下文。没配置服务器返回 None，交给本地逻辑。"""
+    from zymor.remote import RemoteSettings, fetch_context, project_name
+
+    if _flag(args, "vault", None):
+        return None
+    try:
+        settings = RemoteSettings.from_config(config)
+        if settings is None:
+            return None
+        if not settings.inject or settings.excludes(Path.cwd()):
+            return 0
+        result = fetch_context(
+            settings,
+            task=args.task,
+            project=args.project or project_name(Path.cwd()),
+            budget_tokens=args.budget_tokens,
+        )
+    except Exception as error:  # 钩子绝不能因为任何异常让宿主失败
+        message = error.message if isinstance(error, ZymorError) else str(error)
+        print(f"zymor hook context 已跳过: {message}", file=sys.stderr)
+        return 0
+    _emit(args, result, str(result.get("text") or ""))
+    return 0
+
+
+def cmd_connect(args: argparse.Namespace) -> int:
+    import getpass
+
+    from zymor.connect import (
+        install_claude_code_hooks,
+        save_connection,
+        verify_connection,
+        zymor_command,
+    )
+    from zymor.remote import check_url
+
+    config = load_config()
+    url = check_url(args.url, allow_insecure=bool(config.get("remote.allow_insecure_http", False)))
+    env_name = str(config.get("remote.token_env", "ZYMOR_REMOTE_TOKEN"))
+    if args.token_stdin:
+        token = sys.stdin.readline().strip()
+    else:
+        token = os.environ.get(env_name, "").strip()
+        if not token and sys.stdin.isatty():
+            token = getpass.getpass("服务器的 HTTP token: ").strip()
+    if not token:
+        raise UsageError(
+            "没有拿到 token", hint=f"用 --token-stdin 传入，或先 export {env_name}=<token>"
+        )
+    ca_file = str(Path(args.ca_file).expanduser().resolve()) if args.ca_file else None
+    if not args.no_verify:
+        verify_connection(url, token, ca_file=ca_file)
+    saved = save_connection(url, token, ca_file=ca_file)
+    payload: dict[str, Any] = {"url": url, "verified": not args.no_verify, **saved}
+    lines = [
+        f"已连接 {url}" + ("" if not args.no_verify else "（未测试连接）"),
+        f"- 配置: {saved['config']}",
+        f"- token: {saved['token_file']}（权限 600）",
+    ]
+    if args.claude_code:
+        target = args.settings or Path("~/.claude/settings.json").expanduser()
+        hooks = install_claude_code_hooks(target, zymor_command())
+        payload["claude_code"] = hooks
+        added = "、".join(hooks["added"]) if hooks["added"] else "无（已存在）"
+        lines.append(f"- Claude Code 钩子: 新增 {added}（{hooks['settings']}）")
+        if hooks["backup"]:
+            lines.append(f"- 原文件备份: {hooks['backup']}")
+    else:
+        lines.append("- 钩子未安装。加 --claude-code 自动写入 Claude Code，或按文档手工配置")
+    lines.append("需要让 Agent 主动读写记忆时，再接入 MCP：")
+    lines.append(
+        f"  claude mcp add --transport http zymor {url}/mcp "
+        '--header "Authorization: Bearer <token>"'
+    )
+    _emit(args, payload, "\n".join(lines))
+    return 0
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    from zymor.ingest import ingest_paths
+
+    _, vault = _context(args)
+    results = ingest_paths(
+        vault,
+        list(args.paths),
+        session_id=args.session,
+        fmt=args.format,
+        include_tools=bool(args.include_tools),
+    )
+    captured = sum(item.captured for item in results)
+    payload = {"captured": captured, "files": [item.to_dict() for item in results]}
+    lines = [f"已导入 {captured} 条 L0 事件（{len(results)} 个文件）"]
+    lines.extend(
+        f"- {item.session_id}: +{item.captured}（跳过 {item.skipped}）" for item in results
+    )
+    _emit(args, payload, "\n".join(lines))
+    return 0
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    from zymor.sync import mirror_vault, remote_from_config, sync_vault
+
+    if args.action == "mirror":
+        mirror_config = load_config()
+        target = (args.to or Path("~/.zymor/mirror")).expanduser()
+        result = mirror_vault(remote_from_config(mirror_config), target)
+        _emit(
+            args,
+            result,
+            f"镜像 {result['path']}：下载 {len(result['downloaded'])}，"
+            f"删除 {len(result['deleted'])}，共 {result['total']} 个节点",
+        )
+        return 0
+    config, vault = _context(args)
+    if bool(_flag(args, "global_vault")):
+        user_vault = _global_vault(config)
+        if user_vault is None:
+            raise NotFoundError("未找到用户库", hint="运行 `zymor init --global`")
+        vault = user_vault
+    if args.force and args.action not in ("push", "pull"):
+        raise UsageError("--force 必须配合 push 或 pull", hint="先决定以本地还是远端为准")
+    remote = remote_from_config(config)
+    report = sync_vault(
+        vault,
+        remote,
+        action=args.action,
+        scope=args.scope or config.get("sync.scope", None) or None,
+        remote_key=remote.url,
+        include_events=bool(args.include_events or config.get("sync.include_events", False)),
+        force=bool(args.force),
+    )
+    plan = report.plan
+    if args.action == "status":
+        lines = [
+            f"分区 {report.scope}：待上传 {len(plan.upload)}，待下载 {len(plan.download)}，"
+            f"待删远端 {len(plan.delete_remote)}，待删本地 {len(plan.remote_deleted)}，"
+            f"冲突 {len(plan.conflicts)}，一致 {len(plan.in_sync)}"
+        ]
+    else:
+        lines = [
+            f"分区 {report.scope}：上传 {len(report.uploaded)}，下载 {len(report.downloaded)}，"
+            f"删远端 {len(report.deleted_remote)}，删本地 {len(report.deleted_local)}"
+        ]
+    lines.extend(f"提示: {warning}" for warning in report.warnings)
+    _emit(args, report.to_dict(), "\n".join(lines))
+    return 0
+
+
 def cmd_hook(args: argparse.Namespace) -> int:
     from zymor.harness import LocalHarness
 
+    if args.hook_command == "capture":
+        return _hook_capture(args)
+    if args.hook_command == "recall":
+        return _hook_recall(args)
+    try:
+        hook_config = load_config()
+    except ZymorError as error:
+        # 配置文件损坏时，会话启动钩子也只提示、不失败。
+        print(f"zymor hook context 已跳过: {error.message}", file=sys.stderr)
+        return 0
+    remote_result = _hook_context_remote(args, hook_config)
+    if remote_result is not None:
+        return remote_result
     config, vault = _context(args)
     if args.hook_command == "context":
         result = LocalHarness().session_start(
@@ -1190,7 +1479,7 @@ def cmd_focus(args: argparse.Namespace) -> int:
 
 def cmd_mcp(args: argparse.Namespace) -> int:
     config, vault = _context(args)
-    from zymor.mcp_server import build_server
+    from zymor.mcp_server import MIN_TOKEN_CHARS, build_server, resolve_http_settings, run_http
 
     read_only = True if args.read_only else None
     transport = str(args.transport or config.get("mcp.transport") or "stdio")
@@ -1205,13 +1494,27 @@ def cmd_mcp(args: argparse.Namespace) -> int:
             "HTTP 传输必须配置 token",
             hint=f"export {token_env or 'ZYMOR_MCP_HTTP_TOKEN'}=<token>；或改用 stdio",
         )
-    if args.port:
-        config.data["mcp"]["port"] = int(args.port)
-    host = str(config.get("mcp.host") or "127.0.0.1")
-    port = int(config.get("mcp.port") or 8765)
-    server = build_server(vault, config, read_only=read_only, http_token=token)
-    print(f"zymor MCP（streamable-http）: http://{host}:{port}", file=sys.stderr)
-    server.run("streamable-http", host=host, port=port)
+    settings = resolve_http_settings(
+        config,
+        host=args.host,
+        port=args.port,
+        tls_cert=args.tls_cert,
+        tls_key=args.tls_key,
+    )
+    if len(token) < MIN_TOKEN_CHARS and settings.exposed:
+        raise UsageError(
+            f"对外监听时 token 至少 {MIN_TOKEN_CHARS} 个字符",
+            hint='用 `python -c "import secrets; print(secrets.token_urlsafe(32))"` 生成',
+        )
+    server = build_server(
+        vault, config, read_only=read_only, http_token=token, http_settings=settings
+    )
+    print(
+        f"zymor MCP（streamable-http）: {settings.public_url}/mcp"
+        f"（监听 {settings.host}:{settings.port}，TLS={'on' if settings.tls else 'off'}）",
+        file=sys.stderr,
+    )
+    run_http(server, settings)
     return 0
 
 
@@ -1232,6 +1535,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         "read": cmd_read,
         "log": cmd_log,
         "capture": cmd_capture,
+        "ingest": cmd_ingest,
+        "sync": cmd_sync,
+        "connect": cmd_connect,
         "doctor": cmd_doctor,
         "stats": cmd_stats,
         "focus": cmd_focus,
@@ -1253,10 +1559,12 @@ def _dispatch(args: argparse.Namespace) -> int:
     return handler(args)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """入参：命令行参数（默认取 sys.argv）。出参：进程退出码。CLI 入口。"""
+def main(argv: list[str] | None = None, *, hook_payload: dict[str, Any] | None = None) -> int:
+    """入参：命令行参数（默认取 sys.argv）与已读入的 Hook 输入。出参：进程退出码。CLI 入口。"""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if hook_payload is not None:
+        args.hook_payload = hook_payload
     try:
         return _dispatch(args)
     except ZymorError as error:

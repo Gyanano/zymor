@@ -30,7 +30,9 @@ VAULT_SUBDIRS = (
     "L0",
     "L1/focus",
 )
-VAULT_GITIGNORE = "L0/\nL1/\nindex/\naudit/\ndream/watermarks.json\ncapture/\n.lock\n"
+VAULT_GITIGNORE = (
+    "L0/\nL1/\nindex/\naudit/\ndream/watermarks.json\ndream/pending.jsonl\ncapture/\n.lock\n"
+)
 CONFIG_TEMPLATE = """# Zymor 配置模板；键与默认值见 project configuration documentation
 [vault]
 # path = ".zymor/vault"

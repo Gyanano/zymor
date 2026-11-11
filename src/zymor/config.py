@@ -15,7 +15,10 @@ DEFAULTS: dict[str, Any] = {
         "timeout_s": 60,
         "max_retries": 3,
         "models": {
+            # default 是所有角色的兜底模型；只配这一项，做梦与写入去重就能工作。
+            "default": None,
             "extract": None,
+            "dedupe": None,
             "dream": None,
             "arbitration": None,
             "judge": "gpt-4o",
@@ -77,6 +80,9 @@ DEFAULTS: dict[str, Any] = {
     "dream": {
         "allow_tool_trigger": True,
         "auto_after_close": False,
+        "auto_after_ingest_events": 200,
+        "auto_min_interval_minutes": 30,
+        "auto_max_runs_per_day": 12,
         "batch_events": 200,
         "max_events_per_run": 2000,
         "l0_retention_days": 90,
@@ -91,7 +97,14 @@ DEFAULTS: dict[str, Any] = {
         "max_arbitrations": 20,
         "max_arbitration_attempts": 3,
         "rem": {"enabled": True, "max_pairs": 3},
-        "budget": {"max_llm_calls": 100, "max_usd": 2, "max_nodes_changed": 200},
+        "pending_retention_days": 90,
+        "pending_max": 500,
+        "budget": {
+            "max_llm_calls": 100,
+            "max_usd": 2,
+            "max_tokens": 2_000_000,
+            "max_nodes_changed": 200,
+        },
     },
     "mcp": {
         "transport": "stdio",
@@ -99,10 +112,45 @@ DEFAULTS: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8765,
         "http_token_env": "ZYMOR_MCP_HTTP_TOKEN",
+        "tls_cert": None,
+        "tls_key": None,
+        "public_url": None,
+        "allowed_hosts": [],
+        "allow_insecure_http": False,
+        "ingest_endpoint": True,
+        "sync_endpoint": True,
         "instructions_max_chars": 1800,
         "resources": {"enabled": True},
         "prompts": {"enabled": True},
         "benchmark_profile": False,
+    },
+    "recall": {
+        "top_k": 5,
+        "token_budget": 600,
+        "min_shared_terms": 3,
+        "min_coverage": 0.15,
+        "min_semantic_score": 0.45,
+    },
+    "remote": {
+        "url": None,
+        "token_env": "ZYMOR_REMOTE_TOKEN",
+        "token_file": "~/.zymor/remote.token",
+        "ca_file": None,
+        "allow_insecure_http": False,
+        "upload": True,
+        "inject": True,
+        "exclude": [],
+        "timeout_s": 8,
+        "recall_timeout_s": 3,
+        "recall_min_chars": 6,
+    },
+    "sync": {
+        "url": None,
+        "token_env": "ZYMOR_SYNC_TOKEN",
+        "scope": None,
+        "include_events": False,
+        "ca_file": None,
+        "allow_insecure_http": False,
     },
     "eval": {
         "budget_usd": 5,
@@ -207,6 +255,61 @@ def _set_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = value
 
 
+# 项目目录里的配置可能来自别人的仓库，不能让它决定「对话和 token 发到哪里」。
+# 项目配置对这两组键只能做一件事：关掉本项目的上传与注入，或改同步分区名。
+PROJECT_ALLOWED: dict[str, tuple[str, ...]] = {
+    "remote": ("upload", "inject"),
+    "sync": ("scope",),
+    # 服务监听在哪、要不要 TLS、用哪个环境变量当 token，也不能由仓库决定；
+    # 否则在克隆下来的目录里启动 `zymor mcp` 就可能把服务明文暴露到公网。
+    "mcp": ("mode", "instructions_max_chars", "resources", "prompts", "benchmark_profile"),
+    # 项目可以指定自己的项目库位置，但不能把「用户库」换成仓库里自带的库：
+    # 用户库里的 verified L4 会被当作用户确认过的偏好注入会话。
+    "vault": ("path",),
+}
+
+
+ENDPOINT_KEYS = ("base_url", "api_key_env")
+
+
+def _strip_untrusted(data: dict[str, Any]) -> list[str]:
+    """入参：项目级配置（原地修改）。出参：被忽略的点分键名。"""
+    dropped: list[str] = []
+    for section, allowed in PROJECT_ALLOWED.items():
+        table = data.get(section)
+        if not isinstance(table, dict):
+            if section in data:
+                dropped.append(section)
+                del data[section]
+            continue
+        for key in list(table):
+            # upload / inject 只允许关闭：项目不能替用户重新打开上传。
+            keep = key in allowed and not (section == "remote" and table[key] is not False)
+            if not keep:
+                dropped.append(f"{section}.{key}")
+                del table[key]
+    # LLM 与向量接口的地址、密钥变量名同理：项目配置可以选模型，但不能决定
+    # 「带着你的 API key 的请求发到哪台主机」。这两项只从用户配置与环境变量读取。
+    for section in ("llm", "embedding"):
+        table = data.get(section)
+        if not isinstance(table, dict):
+            continue
+        tables = [(section, table)]
+        roles = table.get("roles")
+        if isinstance(roles, dict):
+            tables.extend(
+                (f"{section}.roles.{name}", role)
+                for name, role in roles.items()
+                if isinstance(role, dict)
+            )
+        for prefix, target in tables:
+            for key in ENDPOINT_KEYS:
+                if key in target:
+                    dropped.append(f"{prefix}.{key}")
+                    del target[key]
+    return dropped
+
+
 def find_project_root(start: Path) -> Path | None:
     """入参：起始目录。出参：最近的含 `.zymor/` 的祖先目录；找不到返回 None。"""
     current = start.resolve()
@@ -244,7 +347,10 @@ def load_config(
     if project_root is not None:
         project_config = project_root / ".zymor" / "config.toml"
         if project_config.is_file():
-            _merge(config.data, _load_toml(project_config))
+            project_data = _load_toml(project_config)
+            for dropped in _strip_untrusted(project_data):
+                config.sources.append(f"ignored:{project_config}:{dropped}")
+            _merge(config.data, project_data)
             config.sources.append(str(project_config))
     for env_name, value in os.environ.items():
         if not env_name.startswith("ZYMOR_"):

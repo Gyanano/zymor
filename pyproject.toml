@@ -18,7 +18,7 @@ eval = ["numpy>=1.26", "backoff>=2.2", "tqdm>=4.66", "httpx>=0.28"]
 dev = ["mypy>=1.10", "pytest>=8.0", "ruff>=0.6", "types-PyYAML>=6.0"]
 
 [project.scripts]
-zymor = "zymor.cli:main"
+zymor = "zymor.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

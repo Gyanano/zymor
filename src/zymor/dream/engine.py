@@ -255,6 +255,17 @@ def run_dream(
                         "usd": 0.0,
                     },
                 )
+        if budget.unpriced_calls:
+            ctx.warn(
+                f"{budget.unpriced_calls} 次 LLM 调用的模型没有配置单价，费用按 0 计，"
+                "max_usd 对它们不生效（本次由 max_tokens 限流）。"
+                "在 [llm.pricing.<模型名>] 配置 input_per_1m / output_per_1m 后费用上限才生效。"
+            )
+        if not dream_clients.clients and plan.event_count:
+            ctx.warn(
+                "没有任何可用的 LLM 角色，本次未消化 L0 事件。"
+                "设置 [llm.models].default 与对应的 API key 环境变量后重试。"
+            )
         finished = now_iso()
         report = DreamReport(
             run_id=run_id,
