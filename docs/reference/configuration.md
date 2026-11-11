@@ -2,6 +2,13 @@
 
 配置按以下顺序合并，后者覆盖前者：内置默认值 → `~/.zymor/config.toml` → `<项目>/.zymor/config.toml` → 环境变量 → 命令行参数。
 
+项目目录可能来自别人的仓库，所以项目级配置里以下键不生效，只能写在用户级配置或环境变量里：
+
+- `[remote]` 的全部键，`upload = false` 与 `inject = false` 除外；
+- `[sync]` 的全部键，`scope` 除外；
+- `llm.base_url`、`llm.api_key_env`、`[llm.roles.<角色>]` 下的这两个键；
+- `embedding.base_url`、`embedding.api_key_env`。
+
 环境变量的写法：`ZYMOR_<组>__<键>`，层级之间用两个下划线，例如 `ZYMOR_MCP__PUBLIC_URL`、`ZYMOR_LLM__MODELS__DEFAULT`。数组类型的键（如 `mcp.allowed_hosts`）只能写在配置文件里。
 
 本页列出常用的键。完整的默认值以 `src/zymor/config.py` 的 `DEFAULTS` 为准。

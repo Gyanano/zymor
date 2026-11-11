@@ -94,9 +94,9 @@ MIN_TOKEN_CHARS = 24
 MAX_INGEST_BYTES = 2 * 1024 * 1024
 MAX_INGEST_MESSAGES = 2000
 MAX_QUERY_BYTES = 64 * 1024
-MAX_RECENT_BATCHES = 4096
+MAX_RECENT_MESSAGES = 50_000
 INGEST_LOCK_RETRIES = 5
-_RECENT_BATCHES: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_RECENT_MESSAGES: OrderedDict[str, None] = OrderedDict()
 _BATCH_LOCK = threading.Lock()
 
 
@@ -619,36 +619,49 @@ def ingest_payload(vault: Vault, payload: Any) -> tuple[int, dict[str, Any]]:
         return 400, {"error": "invalid_payload", "hint": "messages 必须是非空数组"}
     if len(messages) > MAX_INGEST_MESSAGES:
         return 413, {"error": "too_many_messages", "hint": f"单次最多 {MAX_INGEST_MESSAGES} 条"}
-    raw_batch = payload.get("batch_id")
-    batch_key = (
-        f"{vault.root}:{raw_batch}"
-        if isinstance(raw_batch, str) and 8 <= len(raw_batch) <= 64
-        else None
-    )
-    if batch_key is not None:
-        with _BATCH_LOCK:
-            previous = _RECENT_BATCHES.get(batch_key)
-        if previous is not None:
-            # 客户端没收到上一次的回复而重发了同一批：不重复写入。
-            return 200, {**previous, "captured": 0, "duplicate": True}
-    result = None
-    for attempt in range(INGEST_LOCK_RETRIES):
-        try:
-            result = ingest_messages(vault, session_id, messages, project=payload.get("project"))
-            break
-        except ZymorError as error:
-            # 写入锁只在别的写入落盘的瞬间被占用（包括后台做梦写节点），稍等再试。
-            if error.kind == "locked" and attempt < INGEST_LOCK_RETRIES - 1:
-                time.sleep(0.1 * (attempt + 1))
-                continue
-            return 409 if error.kind == "locked" else 400, error.to_dict()
-    assert result is not None
+    scope_key = f"{vault.root}:{session_id}:"
+    # 整个「查重 → 写入 → 登记」在一把锁里完成，同一条消息的两次并发重发不会都写进去。
+    with _BATCH_LOCK:
+        fresh: list[Any] = []
+        fresh_ids: list[str] = []
+        duplicates = 0
+        for message in messages:
+            message_id = message.get("id") if isinstance(message, dict) else None
+            if isinstance(message_id, str) and 8 <= len(message_id) <= 64:
+                if scope_key + message_id in _RECENT_MESSAGES:
+                    duplicates += 1
+                    continue
+                fresh_ids.append(scope_key + message_id)
+            fresh.append(message)
+        if not fresh:
+            # 客户端没收到上一次的回复而重发：不重复写入。
+            return 200, {
+                "path": "<messages>",
+                "session_id": session_id,
+                "format": "generic",
+                "captured": 0,
+                "skipped": 0,
+                "duplicates": duplicates,
+                "warnings": [],
+            }
+        result = None
+        for attempt in range(INGEST_LOCK_RETRIES):
+            try:
+                result = ingest_messages(vault, session_id, fresh, project=payload.get("project"))
+                break
+            except ZymorError as error:
+                # 写入锁只在别的写入落盘的瞬间被占用（包括后台做梦写节点），稍等再试。
+                if error.kind == "locked" and attempt < INGEST_LOCK_RETRIES - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                return 409 if error.kind == "locked" else 400, error.to_dict()
+        assert result is not None
+        for message_key in fresh_ids:
+            _RECENT_MESSAGES[message_key] = None
+        while len(_RECENT_MESSAGES) > MAX_RECENT_MESSAGES:
+            _RECENT_MESSAGES.popitem(last=False)
     body = result.to_dict()
-    if batch_key is not None:
-        with _BATCH_LOCK:
-            _RECENT_BATCHES[batch_key] = body
-            while len(_RECENT_BATCHES) > MAX_RECENT_BATCHES:
-                _RECENT_BATCHES.popitem(last=False)
+    body["duplicates"] = duplicates
     return 200, body
 
 

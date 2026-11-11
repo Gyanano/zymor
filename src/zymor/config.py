@@ -263,6 +263,9 @@ PROJECT_ALLOWED: dict[str, tuple[str, ...]] = {
 }
 
 
+ENDPOINT_KEYS = ("base_url", "api_key_env")
+
+
 def _strip_untrusted(data: dict[str, Any]) -> list[str]:
     """入参：项目级配置（原地修改）。出参：被忽略的点分键名。"""
     dropped: list[str] = []
@@ -279,6 +282,25 @@ def _strip_untrusted(data: dict[str, Any]) -> list[str]:
             if not keep:
                 dropped.append(f"{section}.{key}")
                 del table[key]
+    # LLM 与向量接口的地址、密钥变量名同理：项目配置可以选模型，但不能决定
+    # 「带着你的 API key 的请求发到哪台主机」。这两项只从用户配置与环境变量读取。
+    for section in ("llm", "embedding"):
+        table = data.get(section)
+        if not isinstance(table, dict):
+            continue
+        tables = [(section, table)]
+        roles = table.get("roles")
+        if isinstance(roles, dict):
+            tables.extend(
+                (f"{section}.roles.{name}", role)
+                for name, role in roles.items()
+                if isinstance(role, dict)
+            )
+        for prefix, target in tables:
+            for key in ENDPOINT_KEYS:
+                if key in target:
+                    dropped.append(f"{prefix}.{key}")
+                    del target[key]
     return dropped
 
 

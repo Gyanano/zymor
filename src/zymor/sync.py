@@ -529,9 +529,10 @@ def sync_vault(
     plan.conflicts = [path for path in plan.conflicts if path not in event_conflicts]
     plan.upload.extend(event_conflicts)
     # 本地的原始对话永远不因远端的删除标记而删除。
-    plan.remote_deleted = [
-        path for path in plan.remote_deleted if not EVENT_PATH_RE.fullmatch(path)
-    ]
+    # 被保护规则拦下的路径仍要沿用旧 base。否则下次同步时它们看起来像「从未同步过」，
+    # 会被重新上传，把别的机器的删除撤销掉。
+    held = [path for path in plan.remote_deleted if EVENT_PATH_RE.fullmatch(path)]
+    plan.remote_deleted = [path for path in plan.remote_deleted if path not in held]
     warnings: list[str] = []
     local_nodes = sum(1 for path in local if NODE_PATH_RE.fullmatch(path))
     if len(plan.remote_deleted) > MASS_DELETE_MIN and len(plan.remote_deleted) * 2 > local_nodes:
@@ -540,6 +541,7 @@ def sync_vault(
             f"远端要求删除 {len(plan.remote_deleted)} 个本地节点，超过本地总数的一半，已拒绝执行。"
             "确认无误后逐个运行 `zymor forget <id>`，或检查服务器状态"
         )
+        held.extend(plan.remote_deleted)
         plan.remote_deleted = []
     report = SyncReport(scope=resolved_scope, action=action, plan=plan, warnings=warnings)
     if action == "status":
@@ -547,7 +549,7 @@ def sync_vault(
 
     new_base = {path: local[path] for path in plan.in_sync}
     # 没处理的条目沿用旧 base，下次还能判断是哪一边改的。
-    for path in (*plan.upload, *plan.download, *plan.conflicts, *plan.remote_deleted):
+    for path in (*plan.upload, *plan.download, *plan.conflicts, *plan.remote_deleted, *held):
         if path in base:
             new_base[path] = base[path]
     for path in plan.delete_remote:

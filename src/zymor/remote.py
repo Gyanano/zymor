@@ -13,6 +13,7 @@ import http.client
 import json
 import os
 import ssl
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -34,7 +35,9 @@ if TYPE_CHECKING:
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 UPLOAD_BATCH_MESSAGES = 400
-UPLOAD_BATCH_BYTES = 1024 * 1024
+# 远小于常见反向代理的默认请求体上限（nginx 为 1 MB）。
+UPLOAD_BATCH_BYTES = 256 * 1024
+LOCK_WAIT_SECONDS = 5.0
 MAX_PENDING_RETRIES = 5
 MAX_RECALL_IDS = 300
 KIND_ROLES = {"user_message": "user", "assistant_message": "assistant", "system_note": "system"}
@@ -246,20 +249,29 @@ def _upload_lock() -> Any:
         yield True
         return
     with path.open("w") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            yield False
-            return
+        # 上传通常只要一两秒，先等一会儿；一直拿不到才放弃。
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(0.1)
         try:
             yield True
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def _message(item: IngestItem) -> dict[str, Any]:
+def _message(item: IngestItem, message_id: str) -> dict[str, Any]:
     # 服务器单条事件只存 8 KB，超出的部分传上去也会被截掉。
+    # id 由「哪个文件的哪一行的第几条」决定，与怎样分批无关。请求超时后重发时，
+    # 即使对话文件又多了几行、分批变了，服务器也能认出已经收过的消息。
     message: dict[str, Any] = {
+        "id": message_id,
         "role": KIND_ROLES.get(item.kind, "tool"),
         "kind": item.kind,
         "content": item.content[:MAX_UPLOAD_CONTENT_CHARS],
@@ -303,38 +315,45 @@ def upload_transcript(
     error: RemoteError | None = None
     batch: list[dict[str, Any]] = []
     batch_bytes = 0
-    batch_start = committed
     batch_end = committed
 
-    def flush() -> None:
-        nonlocal batch, batch_bytes, committed, uploaded, dropped, batch_start
-        if not batch:
-            committed = batch_end
-            batch_start = batch_end
-            return
-        # batch_id 由「哪个文件的哪一段」决定。请求超时后重发同一段时，服务器据此识别并跳过。
-        digest = hashlib.sha256(f"{key}:{batch_start}:{batch_end}".encode()).hexdigest()
-        payload: dict[str, Any] = {
-            "session_id": final_session,
-            "messages": batch,
-            "batch_id": digest[:32],
-        }
+    def post(messages: list[dict[str, Any]]) -> None:
+        payload: dict[str, Any] = {"session_id": final_session, "messages": messages}
         if resolved_project:
             payload["project"] = resolved_project
-        try:
-            settings.post("/ingest", payload)
-            uploaded += len(batch)
-        except RemoteError as failure:
-            if failure.status not in POISON_STATUS:
-                raise
-            dropped += len(batch)
+        settings.post("/ingest", payload)
+
+    def flush() -> None:
+        nonlocal batch, batch_bytes, committed, uploaded, dropped
+        if batch:
+            try:
+                post(batch)
+                uploaded += len(batch)
+            except RemoteError as failure:
+                if failure.status not in POISON_STATUS:
+                    raise
+                # 整批被拒收时逐条重发，只丢掉真正有问题的那一条。
+                # 已经送达的消息带着 id，中途失败后重发不会重复。
+                for message in batch:
+                    try:
+                        post([message])
+                        uploaded += 1
+                    except RemoteError as single:
+                        if single.status not in POISON_STATUS:
+                            raise
+                        dropped += 1
         committed = batch_end
-        batch_start = batch_end
         batch, batch_bytes = [], 0
 
     try:
         for line_end, items in scan.lines:
-            messages = [_message(item) for item in items]
+            messages = [
+                _message(
+                    item,
+                    hashlib.sha256(f"{key}:{line_end}:{position}".encode()).hexdigest()[:32],
+                )
+                for position, item in enumerate(items)
+            ]
             size = sum(
                 len(json.dumps(message, ensure_ascii=False).encode("utf-8")) for message in messages
             )
@@ -409,11 +428,20 @@ def _upload_locked(
         for key, entry in list(files.items()):
             if retried >= MAX_PENDING_RETRIES:
                 break
-            if key == current or not entry.get("pending"):
+            if key == current:
                 continue
-            if not Path(key).is_file():
+            other = Path(key)
+            if not other.is_file():
                 # 对话文件已被宿主清理，没传完的部分无法恢复。
                 entry["pending"] = False
+                continue
+            # 除了上次失败的会话，也补传「文件比已上传的位置长」的会话：
+            # 它最后一次钩子可能因为抢不到锁而被跳过，之后再没有钩子替它上传。
+            try:
+                behind = other.stat().st_size > int(entry.get("offset") or 0)
+            except (OSError, TypeError, ValueError):
+                behind = False
+            if not entry.get("pending") and not behind:
                 continue
             retried += 1
             if upload_transcript(settings, Path(key), state=files)["pending"]:
@@ -479,4 +507,7 @@ def recall_for_prompt(settings: RemoteSettings, payload: dict[str, Any]) -> str:
     if state_path is not None:
         seen.extend(str(hit.get("id")) for hit in hits if isinstance(hit, dict))
         atomic_write_text(state_path, json.dumps(seen[-MAX_RECALL_IDS:]) + "\n")
-    return rendered[:MAX_INJECT_CHARS]
+    if len(rendered) > MAX_INJECT_CHARS:
+        # 截断后补上闭合标签，否则上传时这一块清理不掉。
+        rendered = rendered[:MAX_INJECT_CHARS].rstrip() + "\n</zymor-memory>"
+    return rendered

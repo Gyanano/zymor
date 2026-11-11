@@ -71,7 +71,14 @@ def _inline(text: str) -> str:
     节点内容里如果带着注入块自己的标签，会提前闭合外层标签，让后面的内容在下次上传时
     被当成用户说的话。所以去掉这个标签，并把换行压成空格。
     """
-    return " ".join(MEMORY_TAG_RE.sub("", text).split())
+    cleaned = text
+    while True:
+        # 删一次可能把被拆开的标签重新拼起来，所以删到不再变化为止。
+        reduced = MEMORY_TAG_RE.sub("", cleaned)
+        if reduced == cleaned:
+            break
+        cleaned = reduced
+    return " ".join(cleaned.split())
 
 
 def render(hits: list[dict[str, Any]]) -> str:

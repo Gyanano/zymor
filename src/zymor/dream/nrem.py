@@ -429,7 +429,7 @@ def _consolidate(
         ctx.vault, retention_days=_config_int(ctx.config, "dream.pending_retention_days", 90)
     )
     if seq_range is not None:
-        pool.drop_batch(session_id, seq_range)
+        pool.drop_batch(session_id, seq_range, ctx.run_id)
     clusters, deferred = _build_clusters(ctx, candidates, pool, seq_range)
     # 单次出现的候选不再丢弃：进待定池，等后续会话再次出现时一起巩固。
     details["dropped_singletons"] += deferred
@@ -530,6 +530,7 @@ def _build_clusters(
             record = asdict(members[0])
             if seq_range is not None:
                 record["seq_min"], record["seq_max"] = seq_range
+                record["run_id"] = ctx.run_id
             pool.add(record, max_entries=max_pending)
             dropped += 1
             continue

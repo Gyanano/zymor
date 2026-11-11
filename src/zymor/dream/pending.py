@@ -84,7 +84,7 @@ class PendingPool:
         self.entries = kept[overflow:] if overflow > 0 else kept
         self.dirty = True
 
-    def drop_batch(self, session_id: str, seq_range: tuple[int, int]) -> int:
+    def drop_batch(self, session_id: str, seq_range: tuple[int, int], run_id: str = "") -> int:
         """入参：会话与一批事件的 seq 范围。出参：移除的记录数。
 
         同一批事件被重新消化时（上次 run 中途失败），它上次留下的待定记录要先清掉：
@@ -97,6 +97,9 @@ class PendingPool:
             seq_min, seq_max = entry.get("seq_min"), entry.get("seq_max")
             overlapping = (
                 entry.get("session_id") == session_id
+                # 本次 run 里别的批次留下的记录不算重放：事件按时间排序后再分批，
+                # 同一个会话相邻批次的 seq 范围可能交叠。
+                and entry.get("run_id") != run_id
                 and isinstance(seq_min, int)
                 and isinstance(seq_max, int)
                 and seq_min <= high
