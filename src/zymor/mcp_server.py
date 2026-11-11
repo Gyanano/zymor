@@ -3,6 +3,8 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,6 +93,9 @@ MIN_TOKEN_CHARS = 24
 MAX_INGEST_BYTES = 2 * 1024 * 1024
 MAX_INGEST_MESSAGES = 2000
 MAX_QUERY_BYTES = 64 * 1024
+MAX_RECENT_BATCHES = 4096
+_RECENT_BATCHES: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_BATCH_LOCK = threading.Lock()
 
 
 def token_matches(expected: str, presented: str) -> bool:
@@ -118,6 +123,17 @@ class HttpSettings:
     def loopback(self) -> bool:
         """入参：无。出参：是否只监听本机回环地址。"""
         return self.host in LOOPBACK_HOSTS
+
+    @property
+    def exposed(self) -> bool:
+        """入参：无。出参：服务是否可能被本机以外访问。
+
+        监听回环地址但 public_url 指向外部域名，说明前面有反向代理，同样算对外暴露。
+        """
+        from urllib.parse import urlsplit
+
+        public_host = urlsplit(self.public_url).hostname or ""
+        return not self.loopback or public_host not in LOOPBACK_HOSTS
 
 
 def resolve_http_settings(
@@ -159,7 +175,9 @@ def resolve_http_settings(
     scheme = "https" if cert_path else "http"
     public = str(config.get("mcp.public_url", None) or "").rstrip("/")
     if not public:
-        public = f"{scheme}://{resolved_host}:{resolved_port}"
+        # IPv6 字面量在 URL 里要加方括号。
+        url_host = f"[{resolved_host}]" if ":" in resolved_host else resolved_host
+        public = f"{scheme}://{url_host}:{resolved_port}"
     raw_hosts = config.get("mcp.allowed_hosts", []) or []
     hosts = tuple(str(item) for item in raw_hosts) if isinstance(raw_hosts, list) else ()
     return HttpSettings(
@@ -423,9 +441,19 @@ def _register_http_routes(
         )
 
     async def read_json(request: Request, limit: int) -> tuple[Any, Response | None]:
-        body = await request.body()
-        if len(body) > limit:
-            return None, JSONResponse({"error": "payload_too_large"}, status_code=413)
+        too_large = JSONResponse({"error": "payload_too_large"}, status_code=413)
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > limit:
+            return None, too_large
+        # 边读边计数：不能等整个请求体进了内存才发现它超限。
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > limit:
+                return None, too_large
+            chunks.append(chunk)
+        body = b"".join(chunks)
         try:
             return json.loads(body), None
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -589,11 +617,29 @@ def ingest_payload(vault: Vault, payload: Any) -> tuple[int, dict[str, Any]]:
         return 400, {"error": "invalid_payload", "hint": "messages 必须是非空数组"}
     if len(messages) > MAX_INGEST_MESSAGES:
         return 413, {"error": "too_many_messages", "hint": f"单次最多 {MAX_INGEST_MESSAGES} 条"}
+    raw_batch = payload.get("batch_id")
+    batch_key = (
+        f"{vault.root}:{raw_batch}"
+        if isinstance(raw_batch, str) and 8 <= len(raw_batch) <= 64
+        else None
+    )
+    if batch_key is not None:
+        with _BATCH_LOCK:
+            previous = _RECENT_BATCHES.get(batch_key)
+        if previous is not None:
+            # 客户端没收到上一次的回复而重发了同一批：不重复写入。
+            return 200, {**previous, "captured": 0, "duplicate": True}
     try:
         result = ingest_messages(vault, session_id, messages, project=payload.get("project"))
     except ZymorError as error:
         return 409 if error.kind == "locked" else 400, error.to_dict()
-    return 200, result.to_dict()
+    body = result.to_dict()
+    if batch_key is not None:
+        with _BATCH_LOCK:
+            _RECENT_BATCHES[batch_key] = body
+            while len(_RECENT_BATCHES) > MAX_RECENT_BATCHES:
+                _RECENT_BATCHES.popitem(last=False)
+    return 200, body
 
 
 def _register_write_tools(

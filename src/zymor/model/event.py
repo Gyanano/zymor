@@ -119,8 +119,9 @@ def append_event(
     *,
     ts: str | None = None,
     seq: int | None = None,
+    floor: int = 0,
 ) -> EventEntry:
-    """入参：L0 目录、会话、类型、内容，可选 caller 时间与 seq。出参：追加的事件。"""
+    """入参：L0 目录、会话、类型、内容，可选时间、seq 与 seq 下限。出参：追加的事件。"""
     if kind not in EVENT_KINDS:
         raise ValidationError(
             f"未知事件类型: {kind}", field="kind", hint=f"可选：{', '.join(EVENT_KINDS)}"
@@ -136,7 +137,7 @@ def append_event(
     moment = parse_iso(ts) if ts is not None else None
     target = l0_path(l0_dir, moment)
     target.parent.mkdir(parents=True, exist_ok=True)
-    highest = max_session_seq(l0_dir, session_id)
+    highest = max(max_session_seq(l0_dir, session_id), floor)
     assigned = seq if seq is not None and seq > highest else highest + 1
     entry = EventEntry(
         schema_version=1,
@@ -158,6 +159,8 @@ def append_events(
     l0_dir: Path,
     session_id: str,
     items: list[tuple[str, str, dict[str, Any] | None, str | None]],
+    *,
+    floor: int = 0,
 ) -> list[EventEntry]:
     """入参：L0 目录、会话与 (kind, content, meta, ts) 列表。出参：追加的事件。
 
@@ -167,7 +170,7 @@ def append_events(
         raise ValidationError("非法会话标识", field="session_id")
     if not items:
         return []
-    highest = max_session_seq(l0_dir, session_id)
+    highest = max(max_session_seq(l0_dir, session_id), floor)
     lines_by_file: dict[Path, list[str]] = {}
     entries: list[EventEntry] = []
     for kind, content, meta, ts in items:

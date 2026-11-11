@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from zymor.dream.state import seq_floor
 from zymor.errors import UsageError, ValidationError
 from zymor.model.event import append_events
 from zymor.security import redact
@@ -26,11 +27,17 @@ MAX_TOOL_CHARS = 600
 MAX_LINE_BYTES = 4 * 1024 * 1024
 FINGERPRINT_BYTES = 256
 # 宿主注入的包装块不是用户说的话，写入 L0 会污染偏好提炼。
-WRAPPER_RE = re.compile(
-    r"<(system-reminder|local-command-stdout|local-command-stderr|command-name|"
-    r"command-message|command-args|task-notification|zymor-memory)>.*?</\1>",
-    re.DOTALL,
+WRAPPER_TAGS = (
+    "system-reminder",
+    "local-command-stdout",
+    "local-command-stderr",
+    "command-name",
+    "command-message",
+    "command-args",
+    "task-notification",
+    "zymor-memory",
 )
+WRAPPER_OPEN_RE = re.compile("<(" + "|".join(WRAPPER_TAGS) + ")>")
 MESSAGE_KINDS = ("user_message", "assistant_message", "tool_call", "tool_result", "system_note")
 ROLE_KINDS = {
     "user": "user_message",
@@ -96,8 +103,38 @@ def _save_state(vault: Vault, files: dict[str, dict[str, Any]]) -> None:
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
+def strip_wrappers(text: str) -> str:
+    """入参：消息文本。出参：删掉宿主注入的包装块后的文本。
+
+    逐个找开标签，再用 str.find 找对应的闭标签，每个字符至多被扫描常数次。
+    没有闭标签的开标签原样保留。（用一条带回溯的正则做这件事，遇到大量未闭合标签会变成平方时间。）
+    """
+    if "<" not in text:
+        return text
+    parts: list[str] = []
+    position = 0
+    missing: set[str] = set()
+    while True:
+        match = WRAPPER_OPEN_RE.search(text, position)
+        if match is None:
+            break
+        tag = match.group(1)
+        closing = f"</{tag}>"
+        end = -1 if tag in missing else text.find(closing, match.end())
+        if end < 0:
+            # 这个标签之后再也找不到闭标签，后面的同名开标签都不必再找。
+            missing.add(tag)
+            parts.append(text[position : match.end()])
+            position = match.end()
+            continue
+        parts.append(text[position : match.start()])
+        position = end + len(closing)
+    parts.append(text[position:])
+    return "".join(parts)
+
+
 def _clean_text(text: str) -> str:
-    return redact(WRAPPER_RE.sub("", text).strip())
+    return redact(strip_wrappers(text).strip())
 
 
 def _clip(text: str, limit: int) -> str:
@@ -146,9 +183,10 @@ def _claude_code_items(record: dict[str, Any], include_tools: bool) -> list[Inge
                 continue
             if block.get("type") == "tool_use":
                 payload = json.dumps(block.get("input"), ensure_ascii=False, default=str)
-                body = f"{block.get('name')}: {_clip(payload, MAX_TOOL_CHARS)}"
+                # 先脱敏再截断：先截断的话，被切成两半的密钥就认不出来了。
+                body = f"{block.get('name')}: {_clip(redact(payload), MAX_TOOL_CHARS)}"
                 items.append(
-                    IngestItem(kind="tool_call", content=redact(body), ts=ts, meta=dict(base_meta))
+                    IngestItem(kind="tool_call", content=body, ts=ts, meta=dict(base_meta))
                 )
             elif block.get("type") == "tool_result":
                 body = _clip(_clean_text(_block_text(block.get("content"))), MAX_TOOL_CHARS)
@@ -226,18 +264,27 @@ def resume_offset(path: Path, entry: dict[str, Any]) -> int:
 
     只校验已导入过的文件头：文件被替换或截断时从头读，正常追加时接着读。
     """
-    offset = int(entry.get("offset") or 0)
-    head = int(entry.get("head") or 0)
-    if offset > path.stat().st_size or (
-        offset > 0 and entry.get("fingerprint") != _fingerprint(path, head)
-    ):
+    try:
+        offset = int(entry.get("offset") or 0)
+        head = int(entry.get("head") or 0)
+    except (TypeError, ValueError):
         return 0
-    return offset
+    if offset <= 0:
+        return 0
+    size = path.stat().st_size
+    same_file = head <= size and entry.get("fingerprint") == _fingerprint(path, head)
+    if not same_file:
+        return 0
+    # 文件头没变但文件变短了：是同一个文件被截断，里面没有新内容，不能从头再导入一遍。
+    return min(offset, size)
 
 
 def progress_entry(path: Path, offset: int, **extra: Any) -> dict[str, Any]:
     """入参：对话文件、已处理到的偏移与附加字段。出参：可保存的进度记录。"""
-    head = min(FINGERPRINT_BYTES, offset)
+    # 指纹只取第一行以内的内容：文件末尾被截掉时第一行还在，仍能认出是同一个文件。
+    with path.open("rb") as handle:
+        first_line = len(handle.readline(FINGERPRINT_BYTES))
+    head = min(FINGERPRINT_BYTES, offset, first_line)
     return {
         "offset": offset,
         "head": head,
@@ -257,6 +304,8 @@ def scan_transcript(
 ) -> TranscriptScan:
     """入参：对话文件、起始偏移与格式。出参：偏移之后新增的完整行解析结果。不写任何东西。"""
     scan = TranscriptScan(lines=[], offset=offset, format=fmt, session_id=session_id, skipped=0)
+    auto = fmt == "auto"
+    detected: str | None = None
     for raw, position in _iter_complete_lines(path, offset):
         scan.offset = position
         if len(raw) > MAX_LINE_BYTES or not raw.strip():
@@ -270,19 +319,24 @@ def scan_transcript(
         if not isinstance(record, dict):
             scan.skipped += 1
             continue
-        if scan.format == "auto":
-            scan.format = _detect_format(record)
+        # 自动识别时逐条判断格式。对话文件的第一条记录常常是摘要之类的元数据，
+        # 只看第一条就定格式，会把后面所有消息都当成另一种格式而丢掉。
+        line_format = _detect_format(record) if auto else fmt
         if scan.session_id is None and isinstance(record.get("sessionId"), str):
             scan.session_id = record["sessionId"]
         parsed = (
             _claude_code_items(record, include_tools)
-            if scan.format == "claude-code"
+            if line_format == "claude-code"
             else _generic_items(record)
         )
         if not parsed:
             scan.skipped += 1
             continue
+        detected = detected or line_format
         scan.lines.append((position, parsed))
+    if auto:
+        # 还没有任何一行解析出内容时保持 auto，下次继续识别。
+        scan.format = detected or "auto"
     return scan
 
 
@@ -312,7 +366,8 @@ def ingest_transcript(
         scan = scan_transcript(
             path,
             offset=resume_offset(path, entry),
-            fmt=str(entry.get("format") or fmt),
+            # 调用方明确指定的格式优先；自动识别时才沿用上次识别出的结果。
+            fmt=fmt if fmt != "auto" else str(entry.get("format") or "auto"),
             session_id=session_id or entry.get("session_id"),
             include_tools=include_tools,
         )
@@ -326,6 +381,7 @@ def ingest_transcript(
                 vault.l0_dir,
                 final_session,
                 [(item.kind, item.content, item.meta, item.ts) for item in items],
+                floor=seq_floor(vault, final_session),
             )
             result.captured = len(written)
         files[key] = progress_entry(path, scan.offset, format=scan.format, session_id=final_session)
@@ -359,6 +415,7 @@ def _ingest_json_document(vault: Vault, path: Path, *, session_id: str | None) -
                 vault.l0_dir,
                 final_session,
                 [(item.kind, item.content, item.meta, item.ts) for item in items],
+                floor=seq_floor(vault, final_session),
             )
             result.captured = len(written)
         result.skipped = len(messages) - done - len(items)
@@ -391,6 +448,7 @@ def ingest_messages(
             vault.l0_dir,
             final_session,
             [(item.kind, item.content, item.meta, item.ts) for item in items],
+            floor=seq_floor(vault, final_session),
         )
     result.captured = len(written)
     return result

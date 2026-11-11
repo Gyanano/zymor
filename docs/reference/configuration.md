@@ -96,7 +96,7 @@
 
 ## `[remote]`
 
-本机作为客户端连接服务器时使用。由 `zymor connect` 写入。
+本机作为客户端连接服务器时使用。由 `zymor connect` 写入。只从用户级配置和环境变量读取；项目级配置里只有 `upload = false` 和 `inject = false` 生效。
 
 | 键 | 默认值 | 含义 |
 | --- | --- | --- |
@@ -121,7 +121,7 @@
 | `top_k` | 5 | 每次最多注入的条数 |
 | `token_budget` | 600 | 每次注入的 token 上限 |
 | `min_shared_terms` | 3 | 消息与记忆的标题加摘要至少共享的词项数 |
-| `min_node_coverage` | 0.15 | 共享词项占记忆标题加摘要词项的最低比例 |
+| `min_coverage` | 0.15 | 共享词项数与较短一方词项数（最多按 40 计）的最低比例 |
 | `min_semantic_score` | 0.45 | 启用向量检索时，语义相似度的最低值 |
 
 ## `[sync]`

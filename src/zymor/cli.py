@@ -14,6 +14,7 @@ from zymor import __version__
 from zymor.atlas import generate as generate_artifacts
 from zymor.config import Config, load_config
 from zymor.dream.engine import run_dream
+from zymor.dream.state import seq_floor
 from zymor.errors import NotFoundError, UsageError, ZymorError
 from zymor.maintenance import (
     confirm_persona_draft,
@@ -701,7 +702,13 @@ def cmd_read(args: argparse.Namespace) -> int:
 def cmd_log(args: argparse.Namespace) -> int:
     _, vault = _context(args)
     with vault.writing("log"):
-        entry = append_event(vault.l0_dir, args.session, args.kind, args.content)
+        entry = append_event(
+            vault.l0_dir,
+            args.session,
+            args.kind,
+            args.content,
+            floor=seq_floor(vault, args.session),
+        )
     payload = {
         "session_id": entry.session_id,
         "seq": entry.seq,
@@ -1134,7 +1141,7 @@ def _hook_capture(args: argparse.Namespace) -> int:
             vault = resolve_vault(config, _flag(args, "vault", None), cwd=start)
             result = ingest_hook_payload(vault, payload)
             output = result.to_dict() if result is not None else None
-    except (ZymorError, OSError, ValueError) as error:
+    except Exception as error:  # 钩子绝不能因为任何异常让宿主失败
         message = error.message if isinstance(error, ZymorError) else str(error)
         print(f"zymor hook capture 已跳过: {message}", file=sys.stderr)
         return 0
@@ -1171,7 +1178,7 @@ def _hook_recall(args: argparse.Namespace) -> int:
             text = recall(
                 _scopes(config, vault), prompt, config=config, project=project_name(start)
             )["text"]
-    except (ZymorError, OSError, ValueError) as error:
+    except Exception as error:  # 钩子绝不能因为任何异常让宿主失败
         message = error.message if isinstance(error, ZymorError) else str(error)
         print(f"zymor hook recall 已跳过: {message}", file=sys.stderr)
         return 0
@@ -1198,7 +1205,7 @@ def _hook_context_remote(args: argparse.Namespace, config: Config) -> int | None
             project=args.project or project_name(Path.cwd()),
             budget_tokens=args.budget_tokens,
         )
-    except (ZymorError, OSError, ValueError) as error:
+    except Exception as error:  # 钩子绝不能因为任何异常让宿主失败
         message = error.message if isinstance(error, ZymorError) else str(error)
         print(f"zymor hook context 已跳过: {message}", file=sys.stderr)
         return 0
@@ -1336,7 +1343,13 @@ def cmd_hook(args: argparse.Namespace) -> int:
         return _hook_capture(args)
     if args.hook_command == "recall":
         return _hook_recall(args)
-    remote_result = _hook_context_remote(args, load_config())
+    try:
+        hook_config = load_config()
+    except ZymorError as error:
+        # 配置文件损坏时，会话启动钩子也只提示、不失败。
+        print(f"zymor hook context 已跳过: {error.message}", file=sys.stderr)
+        return 0
+    remote_result = _hook_context_remote(args, hook_config)
     if remote_result is not None:
         return remote_result
     config, vault = _context(args)
@@ -1488,7 +1501,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         tls_cert=args.tls_cert,
         tls_key=args.tls_key,
     )
-    if len(token) < MIN_TOKEN_CHARS and not settings.loopback:
+    if len(token) < MIN_TOKEN_CHARS and settings.exposed:
         raise UsageError(
             f"对外监听时 token 至少 {MIN_TOKEN_CHARS} 个字符",
             hint='用 `python -c "import secrets; print(secrets.token_urlsafe(32))"` 生成',

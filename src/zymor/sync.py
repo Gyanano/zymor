@@ -9,9 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import ssl
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -40,6 +37,8 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_BATCH_BYTES = 3 * 1024 * 1024
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 MAX_PATHS_PER_REQUEST = 2000
+MAX_SYNC_RESPONSE_BYTES = 64 * 1024 * 1024
+MASS_DELETE_MIN = 20
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 ACTIONS = ("manifest", "push", "pull", "delete")
 
@@ -51,7 +50,7 @@ class SyncError(ExternalError):
 def is_sync_path(path: object) -> bool:
     """入参：任意值。出参：是否为允许同步的库内相对路径。拒绝一切带 `..` 或绝对路径的写法。"""
     return isinstance(path, str) and (
-        NODE_PATH_RE.match(path) is not None or EVENT_PATH_RE.match(path) is not None
+        NODE_PATH_RE.fullmatch(path) is not None or EVENT_PATH_RE.fullmatch(path) is not None
     )
 
 
@@ -93,7 +92,7 @@ class SyncStore:
         return cls(vault.root / STORE_DIR)
 
     def _scope_dir(self, scope: str) -> Path:
-        if not isinstance(scope, str) or SCOPE_RE.match(scope) is None:
+        if not isinstance(scope, str) or SCOPE_RE.fullmatch(scope) is None:
             raise ValidationError(
                 "非法分区名",
                 field="scope",
@@ -205,6 +204,8 @@ def handle_sync_request(
         return 403, {"error": "read_only", "hint": "只读模式不接受上传与删除"}
     store = SyncStore.for_vault(vault)
     scope = payload.get("scope")
+    if not isinstance(scope, str) or not scope:
+        return 400, {"error": "invalid_scope", "hint": "缺少 scope"}
     if scope == VAULT_SCOPE:
         return _handle_vault_scope(vault, str(action), payload)
     items = payload.get("files" if action == "push" else "paths", [])
@@ -241,7 +242,7 @@ def _handle_vault_scope(
         return 400, {"error": "invalid_payload", "hint": "paths 必须是数组且不超过上限"}
     files: list[dict[str, str]] = []
     for path in paths:
-        if not isinstance(path, str) or NODE_PATH_RE.match(path) is None:
+        if not isinstance(path, str) or NODE_PATH_RE.fullmatch(path) is None:
             return 400, {"error": "invalid_path", "hint": f"非法同步路径: {path!r}"}
         target = vault.root / path
         if target.is_file():
@@ -268,33 +269,19 @@ class HttpRemote:
 
     def call(self, payload: dict[str, Any]) -> dict[str, Any]:
         """入参：同步请求体。出参：响应体。经 HTTPS 调用服务器的 `/sync`。"""
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            f"{self.url}/sync",
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-            },
-        )
-        context = ssl.create_default_context(cafile=self.ca_file) if self.ca_file else None
+        from zymor.remote import RemoteError, http_json
+
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.timeout_s, context=context
-            ) as response:
-                data = json.loads(response.read())
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", "replace")[:300]
-            hint = "检查 token 是否与服务器一致" if error.code == 401 else None
-            raise SyncError(f"同步请求被拒绝（HTTP {error.code}）: {detail}", hint=hint) from error
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise SyncError(f"无法连接同步服务器 {self.url}: {error}") from error
-        except json.JSONDecodeError as error:
-            raise SyncError("同步服务器返回的不是 JSON") from error
-        if not isinstance(data, dict):
-            raise SyncError("同步服务器返回的结构不合法")
-        return data
+            return http_json(
+                f"{self.url}/sync",
+                self.token,
+                payload,
+                ca_file=self.ca_file,
+                timeout_s=self.timeout_s,
+                max_bytes=MAX_SYNC_RESPONSE_BYTES,
+            )
+        except RemoteError as error:
+            raise SyncError(error.message, hint=error.hint) from error
 
 
 @dataclass
@@ -460,7 +447,7 @@ class SyncReport:
 
 
 def _validate_node(vault: Vault, path: str, content: str) -> None:
-    match = NODE_PATH_RE.match(path)
+    match = NODE_PATH_RE.fullmatch(path)
     if match is None:
         raise ValidationError("只有节点文件可以从远端写回本地", field="path")
     node = MemoryNode.from_markdown(content)
@@ -515,7 +502,7 @@ def sync_vault(
     if action not in ("status", "push", "pull", "run"):
         raise UsageError(f"未知同步动作: {action}", hint="status、push、pull 或 run")
     resolved_scope = scope or default_scope(vault)
-    if SCOPE_RE.match(resolved_scope) is None:
+    if SCOPE_RE.fullmatch(resolved_scope) is None:
         raise UsageError(f"非法分区名: {resolved_scope}")
     key = f"{remote_key}#{resolved_scope}"
     local = local_manifest(vault, include_events=include_events)
@@ -528,20 +515,33 @@ def sync_vault(
     )
     if not include_events:
         remote_files = {
-            name: value for name, value in remote_files.items() if NODE_PATH_RE.match(name)
+            name: value for name, value in remote_files.items() if NODE_PATH_RE.fullmatch(name)
         }
     base = _load_base(vault, key)
     raw_deleted = response.get("deleted")
     tombstoned = {str(path) for path in raw_deleted} if isinstance(raw_deleted, list) else set()
     plan = build_plan(local, remote_files, base, tombstoned)
     # L0 只做备份：远端有而本地没有的事件文件不下载，也不因此删除远端。
-    event_only_remote = [path for path in plan.download if EVENT_PATH_RE.match(path)]
+    event_only_remote = [path for path in plan.download if EVENT_PATH_RE.fullmatch(path)]
     plan.download = [path for path in plan.download if path not in event_only_remote]
-    plan.delete_remote = [path for path in plan.delete_remote if not EVENT_PATH_RE.match(path)]
-    event_conflicts = [path for path in plan.conflicts if EVENT_PATH_RE.match(path)]
+    plan.delete_remote = [path for path in plan.delete_remote if not EVENT_PATH_RE.fullmatch(path)]
+    event_conflicts = [path for path in plan.conflicts if EVENT_PATH_RE.fullmatch(path)]
     plan.conflicts = [path for path in plan.conflicts if path not in event_conflicts]
     plan.upload.extend(event_conflicts)
-    report = SyncReport(scope=resolved_scope, action=action, plan=plan)
+    # 本地的原始对话永远不因远端的删除标记而删除。
+    plan.remote_deleted = [
+        path for path in plan.remote_deleted if not EVENT_PATH_RE.fullmatch(path)
+    ]
+    warnings: list[str] = []
+    local_nodes = sum(1 for path in local if NODE_PATH_RE.fullmatch(path))
+    if len(plan.remote_deleted) > MASS_DELETE_MIN and len(plan.remote_deleted) * 2 > local_nodes:
+        # 远端一次要求删掉本地一半以上的节点，更像是服务器出错或被入侵，而不是正常的删除传播。
+        warnings.append(
+            f"远端要求删除 {len(plan.remote_deleted)} 个本地节点，超过本地总数的一半，已拒绝执行。"
+            "确认无误后逐个运行 `zymor forget <id>`，或检查服务器状态"
+        )
+        plan.remote_deleted = []
+    report = SyncReport(scope=resolved_scope, action=action, plan=plan, warnings=warnings)
     if action == "status":
         return report
 
@@ -623,10 +623,15 @@ def mirror_vault(remote: Remote, target: Path) -> dict[str, Any]:
     只下载内容有变化的节点；服务器上已不存在的节点从副本里删除。副本不是 vault，不参与检索。
     """
     target = target.expanduser()
+    if (target / "vault.json").exists():
+        raise UsageError(
+            f"镜像目标是一个 Zymor 库: {target}",
+            hint="镜像会删除目标里服务器没有的节点。换一个专用目录，例如 ~/.zymor/mirror",
+        )
     response = remote.call({"action": "manifest", "scope": VAULT_SCOPE})
     raw = response.get("files")
     wanted = (
-        {str(name): str(value) for name, value in raw.items() if NODE_PATH_RE.match(str(name))}
+        {str(name): str(value) for name, value in raw.items() if NODE_PATH_RE.fullmatch(str(name))}
         if isinstance(raw, dict)
         else {}
     )
@@ -634,7 +639,7 @@ def mirror_vault(remote: Remote, target: Path) -> dict[str, Any]:
     if (target / "nodes").is_dir():
         for file_path in (target / "nodes").rglob("*.md"):
             relative = file_path.relative_to(target).as_posix()
-            if NODE_PATH_RE.match(relative):
+            if NODE_PATH_RE.fullmatch(relative):
                 existing[relative] = sha256_hex(file_path.read_bytes())
     changed = [path for path, digest in wanted.items() if existing.get(path) != digest]
     downloaded: list[str] = []
@@ -650,6 +655,9 @@ def mirror_vault(remote: Remote, target: Path) -> dict[str, Any]:
             atomic_write_text(target / path, content)
             downloaded.append(path)
     deleted = [path for path in existing if path not in wanted]
+    if existing and not wanted:
+        # 服务器返回空清单时不清空已有副本：更可能是服务器出了问题。
+        deleted = []
     for path in deleted:
         (target / path).unlink(missing_ok=True)
     return {

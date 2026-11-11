@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +23,7 @@ HOOK_EVENTS: tuple[tuple[str, str], ...] = (
     ("PreCompact", "capture"),
     ("SessionEnd", "capture"),
 )
-SECTION_RE = re.compile(r"^\s*\[(?P<name>[^\]]+)\]\s*$")
+SECTION_RE = re.compile(r"^\s*\[(?P<name>[^\]]+)\]\s*(#.*)?$")
 
 
 def user_config_path() -> Path:
@@ -33,8 +35,8 @@ def zymor_command() -> str:
     """入参：无。出参：钩子里调用 zymor 的命令前缀。优先用 PATH 上的可执行文件的绝对路径。"""
     found = shutil.which("zymor")
     if found:
-        return str(Path(found).resolve())
-    return f"{sys.executable} -m zymor"
+        return shlex.quote(str(Path(found).resolve()))
+    return f"{shlex.quote(sys.executable)} -m zymor"
 
 
 def _toml_string(value: str) -> str:
@@ -84,19 +86,40 @@ def save_connection(
     url: str, token: str, *, ca_file: str | None = None, token_file: Path | None = None
 ) -> dict[str, str]:
     """入参：服务器地址、token 与可选 CA 文件。出参：写入的文件路径。token 文件权限为 600。"""
-    config_path = user_config_path()
+    config_path = _real_path(user_config_path())
     existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
     values = {"url": url}
     if ca_file:
         values["ca_file"] = ca_file
-    atomic_write_text(config_path, set_toml_values(existing, "remote", values))
+    updated = set_toml_values(existing, "remote", values)
+    # 行级编辑认不出所有 TOML 写法（点分键、带引号的键）。写入前重新解析，
+    # 结果不对就不写，避免把用户的配置文件改坏。
+    try:
+        parsed = tomllib.loads(updated).get("remote", {})
+    except tomllib.TOMLDecodeError:
+        parsed = None
+    if not isinstance(parsed, dict) or any(parsed.get(k) != v for k, v in values.items()):
+        raise UsageError(
+            f"无法自动修改 {config_path}",
+            hint=f'请手工在其中的 [remote] 表里设置 url = "{url}"，然后重新运行本命令',
+        )
+    if existing and updated != existing:
+        shutil.copy2(config_path, config_path.with_name(config_path.name + ".zymor-bak"))
+    atomic_write_text(config_path, updated)
     target = token_file or Path("~/.zymor/remote.token").expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # 先删旧文件再以 600 新建：不沿用旧文件可能过宽的权限，也不跟随软链接。
+    target.unlink(missing_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(target, flags, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(token + "\n")
-    os.chmod(target, 0o600)
     return {"config": str(config_path), "token_file": str(target)}
+
+
+def _real_path(path: Path) -> Path:
+    """入参：路径。出参：软链接指向的真实路径。原子替换会把软链接换成普通文件，所以写真实文件。"""
+    return path.resolve() if path.is_symlink() else path
 
 
 def verify_connection(url: str, token: str, *, ca_file: str | None = None) -> None:
@@ -120,6 +143,7 @@ def install_claude_code_hooks(settings_path: Path, command: str) -> dict[str, An
 
     只追加缺少的钩子，不动已有内容；改写前把原文件备份为 `<文件名>.zymor-bak`。
     """
+    settings_path = _real_path(settings_path)
     data: dict[str, Any] = {}
     if settings_path.is_file():
         try:
@@ -148,7 +172,7 @@ def install_claude_code_hooks(settings_path: Path, command: str) -> dict[str, An
             and "zymor" in str(item.get("command", ""))
             for group in groups
             if isinstance(group, dict)
-            for item in group.get("hooks", [])
+            for item in (group.get("hooks") or [])
         )
         if present:
             continue

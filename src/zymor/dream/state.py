@@ -86,6 +86,15 @@ class Watermarks:
         self.last_success_at = now_iso()
 
 
+def seq_floor(vault: Vault, session_id: str) -> int:
+    """入参：vault 与会话。出参：该会话已被做梦消化到的 seq。
+
+    新事件的 seq 必须大于它。L0 旧文件被清理后，光看现存文件会让 seq 从 1 重新开始，
+    落在水位线之下的新事件永远不会被消化。
+    """
+    return Watermarks.load(vault).last_seq(session_id)
+
+
 def load_unprocessed_events(vault: Vault, watermarks: Watermarks, limit: int) -> list[EventEntry]:
     """入参：vault、水位线与上限。出参：水位线之后的事件（按 ts 排序，最多 limit 条）。"""
     events: list[EventEntry] = []

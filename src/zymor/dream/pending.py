@@ -84,6 +84,32 @@ class PendingPool:
         self.entries = kept[overflow:] if overflow > 0 else kept
         self.dirty = True
 
+    def drop_batch(self, session_id: str, seq_range: tuple[int, int]) -> int:
+        """入参：会话与一批事件的 seq 范围。出参：移除的记录数。
+
+        同一批事件被重新消化时（上次 run 中途失败），它上次留下的待定记录要先清掉：
+        这批事件会被重新提取一遍，旧记录留着就会被当成「另一次出现」。
+        判断依据是 seq 范围而不是标题，因为 LLM 两次提取的措辞不一定相同。
+        """
+        low, high = seq_range
+        kept: list[dict[str, Any]] = []
+        for entry in self.entries:
+            seq_min, seq_max = entry.get("seq_min"), entry.get("seq_max")
+            overlapping = (
+                entry.get("session_id") == session_id
+                and isinstance(seq_min, int)
+                and isinstance(seq_max, int)
+                and seq_min <= high
+                and seq_max >= low
+            )
+            if not overlapping:
+                kept.append(entry)
+        removed = len(self.entries) - len(kept)
+        if removed:
+            self.entries = kept
+            self.dirty = True
+        return removed
+
     def remove(self, records: list[dict[str, Any]]) -> None:
         """入参：要移除的记录。出参：无。"""
         if not records:

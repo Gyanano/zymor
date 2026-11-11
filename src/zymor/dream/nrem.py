@@ -169,6 +169,10 @@ def run_nrem(ctx: DreamContext, plan: DreamPlan, watermarks: Watermarks) -> Phas
                         details,
                         result,
                         warnings,
+                        seq_range=(
+                            min(event.seq for event in batch),
+                            max(event.seq for event in batch),
+                        ),
                     )
                 except DreamBudgetExceeded as error:
                     stopped = _stop_phase(ctx, error)
@@ -419,11 +423,14 @@ def _consolidate(
     details: dict[str, Any],
     result: PhaseResult,
     warnings: list[str],
+    seq_range: tuple[int, int] | None = None,
 ) -> None:
     pool = PendingPool.load(
         ctx.vault, retention_days=_config_int(ctx.config, "dream.pending_retention_days", 90)
     )
-    clusters, deferred = _build_clusters(ctx, candidates, pool)
+    if seq_range is not None:
+        pool.drop_batch(session_id, seq_range)
+    clusters, deferred = _build_clusters(ctx, candidates, pool, seq_range)
     # 单次出现的候选不再丢弃：进待定池，等后续会话再次出现时一起巩固。
     details["dropped_singletons"] += deferred
     details["deferred_singletons"] += deferred
@@ -439,9 +446,12 @@ def _consolidate(
         )
     try:
         for cluster in clusters:
+            written_before = result.nodes_created + result.nodes_updated
             _consolidate_cluster(ctx, cluster, session_id, project, details, result, warnings)
-            if cluster.recalled:
-                # 写入成功后才把已复发的记录移出待定池，失败时保留以便重试。
+            wrote = result.nodes_created + result.nodes_updated > written_before
+            if cluster.recalled and wrote:
+                # 确实写了节点，才把已复发的记录移出待定池。巩固可能正常返回却什么都没写
+                # （例如目标层不允许写入），这时记录要留着等下一次。
                 pool.remove(cluster.recalled)
                 details["recalled_pending"] += len(cluster.recalled)
     finally:
@@ -491,7 +501,10 @@ def _consolidate_cluster(
 
 
 def _build_clusters(
-    ctx: DreamContext, candidates: list[_Candidate], pool: PendingPool | None = None
+    ctx: DreamContext,
+    candidates: list[_Candidate],
+    pool: PendingPool | None = None,
+    seq_range: tuple[int, int] | None = None,
 ) -> tuple[list[_Cluster], int]:
     if not candidates:
         return [], 0
@@ -504,6 +517,7 @@ def _build_clusters(
     eager = bool(ctx.config.get("dream.eager_singletons", False))
     clusters: list[_Cluster] = []
     dropped = 0
+    taken: set[int] = set()
     for group in groups:
         target_map: dict[str, dict[str, Any]] = {}
         for position in group:
@@ -511,9 +525,12 @@ def _build_clusters(
                 target_map.setdefault(str(row["id"]), row)
         targets = _sort_targets(list(target_map.values()))[:MAX_TARGETS]
         members = [candidates[position] for position in group]
-        recalled = _recall_pending(pool, members)
+        recalled = _recall_pending(pool, members, taken)
         if not targets and len(group) == 1 and not recalled and not eager:
-            pool.add(asdict(members[0]), max_entries=max_pending)
+            record = asdict(members[0])
+            if seq_range is not None:
+                record["seq_min"], record["seq_max"] = seq_range
+            pool.add(record, max_entries=max_pending)
             dropped += 1
             continue
         clusters.append(
@@ -527,10 +544,18 @@ def _build_clusters(
     return clusters, dropped
 
 
-def _recall_pending(pool: PendingPool, members: list[_Candidate]) -> list[dict[str, Any]]:
-    """入参：待定池与本批候选。出参：与候选相关、且来自别的事件的待定记录。"""
+def _recall_pending(
+    pool: PendingPool, members: list[_Candidate], taken: set[int] | None = None
+) -> list[dict[str, Any]]:
+    """入参：待定池、本批候选与已被别的簇取走的记录。出参：与候选相关、且来自别的事件的待定记录。
+
+    一条待定记录只能并入一个簇，否则它的证据会同时出现在两个互不相关的节点里。
+    """
+    claimed = taken if taken is not None else set()
     recalled: list[dict[str, Any]] = []
     for record in pool.entries:
+        if id(record) in claimed:
+            continue
         stored = _candidate_from_record(record)
         for member in members:
             # 同一批事件重跑时会再次提取出同一个候选，它不能算作自己的复发。
@@ -540,6 +565,7 @@ def _recall_pending(pool: PendingPool, members: list[_Candidate]) -> list[dict[s
                 continue
             if _candidates_overlap(stored, member):
                 recalled.append(record)
+                claimed.add(id(record))
                 break
     return recalled
 

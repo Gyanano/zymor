@@ -311,24 +311,31 @@ def memory_search(
                 warnings.append(message)
         return found
 
-    candidates = collect(match_query)
-    partial_ids: set[str] = set()
+    strict = collect(match_query)
+    extra: list[tuple[str, Vault, dict[str, Any]]] = []
     relaxed_query = build_match_query(query_text, relaxed=True)
-    if len(candidates) < limit and relaxed_query != match_query:
-        # 全部词项都命中的节点不够时放宽为「命中任一词项」。自然语言提问很少与节点逐词重合，
-        # 只用 AND 会把相关节点整批漏掉。放宽后按相关度下限过滤，避免只碰巧共享一个词的噪声。
-        strict_ids = {str(row["id"]) for _, _, row in candidates}
+    if len(strict) < limit and relaxed_query != match_query:
+        # 全部词项都命中的节点不够时，补充「命中任一词项」的节点。自然语言提问很少与节点逐词重合，
+        # 只用 AND 会把相关节点整批漏掉。补充的节点只追加在后面，不替换、不挤掉完全命中的结果。
+        strict_ids = {str(row["id"]) for _, _, row in strict}
         relaxed = collect(relaxed_query)
-        best = max((-float(row["rank"]) for _, _, row in relaxed), default=0.0)
-        floor = best * RELAXED_MIN_RELEVANCE
-        candidates = [
-            item
-            for item in relaxed
-            if str(item[2]["id"]) in strict_ids or best <= 0 or -float(item[2]["rank"]) >= floor
-        ]
-        partial_ids = {str(row["id"]) for _, _, row in candidates} - strict_ids
-
-    norms = _bm25_norms([float(row["rank"]) for _, _, row in candidates])
+        # bm25 的数值只在同一个库内可比（小库的 idf 接近 0），相关度下限按库分别计算。
+        best_by_scope: dict[str, float] = {}
+        for label, _, row in relaxed:
+            best_by_scope[label] = max(best_by_scope.get(label, 0.0), -float(row["rank"]))
+        for item in relaxed:
+            label, _, row = item
+            if str(row["id"]) in strict_ids:
+                continue
+            best = best_by_scope[label]
+            if best <= 0 or -float(row["rank"]) >= best * RELAXED_MIN_RELEVANCE:
+                extra.append(item)
+    partial_ids = {str(row["id"]) for _, _, row in extra}
+    candidates = strict + extra
+    # 两组候选来自不同的查询，bm25 各自归一化。
+    norms = _bm25_norms([float(row["rank"]) for _, _, row in strict]) + _bm25_norms(
+        [float(row["rank"]) for _, _, row in extra]
+    )
     ranked: list[SearchHit] = []
     for (label, vault, row), bm25_norm in zip(candidates, norms, strict=True):
         score, why = _score_candidate(
@@ -359,7 +366,10 @@ def memory_search(
                 updated_at=str(row["updated_at"]),
             )
         )
-    ranked.sort(key=lambda hit: (-hit.score, -_updated_timestamp(hit.updated_at)))
+    # 完全命中的结果永远排在部分命中的前面。
+    ranked.sort(
+        key=lambda hit: (hit.id in partial_ids, -hit.score, -_updated_timestamp(hit.updated_at))
+    )
     hits = ranked[:limit]
     costs = [estimate_tokens(_hit_line(hit)) for hit in hits]
     kept, truncated, tokens_estimate = _fit_costs(costs, budget)

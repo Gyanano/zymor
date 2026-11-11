@@ -11,7 +11,7 @@ from zymor.model.node import MemoryNode
 from zymor.store.index import Index
 from zymor.store.nodes import read_node
 from zymor.tokenizer import estimate_tokens
-from zymor.util.time import parse_iso
+from zymor.util.fs import sha256_hex
 from zymor.vault import Vault
 
 DEFAULT_MODEL = "text-embedding-3-small"
@@ -122,15 +122,6 @@ def _all_nodes(vault: Vault) -> list[MemoryNode]:
     return nodes
 
 
-def _is_newer(node_updated_at: str, embedded_at: str | None) -> bool:
-    if embedded_at is None:
-        return True
-    try:
-        return parse_iso(node_updated_at) > parse_iso(embedded_at)
-    except ValueError:
-        return True
-
-
 def build_embeddings(
     vault: Vault,
     config: Config,
@@ -141,12 +132,13 @@ def build_embeddings(
     settings = EmbeddingSettings.from_config(config)
     embedding_client = client or OpenAIEmbeddingClient(settings)
     index = Index(vault.root)
-    embedded_at = {
-        str(row["node_id"]): str(row["updated_at"]) for row in index.embedding_rows(settings.model)
-    }
-    # 只为新增或改过的节点重新计算向量，避免每次全量付费。
+    known = index.embedding_hashes(settings.model)
+    # 只为新增或内容变过的节点重新计算向量。判断依据是被向量化文本的哈希，
+    # 不是 updated_at：很多改动（update_node、手工编辑、同步下来的节点）不会推进 updated_at。
     nodes = [
-        node for node in _all_nodes(vault) if _is_newer(node.updated_at, embedded_at.get(node.id))
+        node
+        for node in _all_nodes(vault)
+        if known.get(node.id) != sha256_hex(node_embedding_text(node))
     ]
     batch_size = int(config.get("embedding.batch_size", DEFAULT_BATCH_SIZE))
     written = 0
@@ -156,7 +148,9 @@ def build_embeddings(
         if len(vectors) != len(batch):
             raise EmbeddingError("向量数量与节点数量不一致")
         for node, vector in zip(batch, vectors, strict=True):
-            index.upsert_embedding(node.id, settings.model, vector)
+            index.upsert_embedding(
+                node.id, settings.model, vector, sha256_hex(node_embedding_text(node))
+            )
             written += 1
     return written
 

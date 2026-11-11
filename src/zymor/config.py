@@ -128,7 +128,7 @@ DEFAULTS: dict[str, Any] = {
         "top_k": 5,
         "token_budget": 600,
         "min_shared_terms": 3,
-        "min_node_coverage": 0.15,
+        "min_coverage": 0.15,
         "min_semantic_score": 0.45,
     },
     "remote": {
@@ -255,6 +255,33 @@ def _set_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = value
 
 
+# 项目目录里的配置可能来自别人的仓库，不能让它决定「对话和 token 发到哪里」。
+# 项目配置对这两组键只能做一件事：关掉本项目的上传与注入，或改同步分区名。
+PROJECT_ALLOWED: dict[str, tuple[str, ...]] = {
+    "remote": ("upload", "inject"),
+    "sync": ("scope",),
+}
+
+
+def _strip_untrusted(data: dict[str, Any]) -> list[str]:
+    """入参：项目级配置（原地修改）。出参：被忽略的点分键名。"""
+    dropped: list[str] = []
+    for section, allowed in PROJECT_ALLOWED.items():
+        table = data.get(section)
+        if not isinstance(table, dict):
+            if section in data:
+                dropped.append(section)
+                del data[section]
+            continue
+        for key in list(table):
+            # upload / inject 只允许关闭：项目不能替用户重新打开上传。
+            keep = key in allowed and not (section == "remote" and table[key] is not False)
+            if not keep:
+                dropped.append(f"{section}.{key}")
+                del table[key]
+    return dropped
+
+
 def find_project_root(start: Path) -> Path | None:
     """入参：起始目录。出参：最近的含 `.zymor/` 的祖先目录；找不到返回 None。"""
     current = start.resolve()
@@ -292,7 +319,10 @@ def load_config(
     if project_root is not None:
         project_config = project_root / ".zymor" / "config.toml"
         if project_config.is_file():
-            _merge(config.data, _load_toml(project_config))
+            project_data = _load_toml(project_config)
+            for dropped in _strip_untrusted(project_data):
+                config.sources.append(f"ignored:{project_config}:{dropped}")
+            _merge(config.data, project_data)
             config.sources.append(str(project_config))
     for env_name, value in os.environ.items():
         if not env_name.startswith("ZYMOR_"):

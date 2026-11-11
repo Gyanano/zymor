@@ -6,7 +6,10 @@ bounded timeouts, no local vault required, and failures never raise into the hos
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
+import hashlib
+import http.client
 import json
 import os
 import ssl
@@ -37,8 +40,19 @@ MAX_RECALL_IDS = 300
 KIND_ROLES = {"user_message": "user", "assistant_message": "assistant", "system_note": "system"}
 
 
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_UPLOAD_CONTENT_CHARS = 8000
+MAX_INJECT_CHARS = 8000
+# 服务器明确拒收的请求（格式不对、太大）重试也不会成功；跳过这一批，不能让它卡住后面的对话。
+POISON_STATUS = (400, 413, 422)
+
+
 class RemoteError(ExternalError):
     kind = "remote_error"
+
+    def __init__(self, message: str, hint: str | None = None, status: int | None = None) -> None:
+        super().__init__(message, hint=hint)
+        self.status = status
 
 
 def client_dir() -> Path:
@@ -53,8 +67,12 @@ def http_json(
     *,
     ca_file: str | None = None,
     timeout_s: float = 8.0,
+    max_bytes: int = MAX_RESPONSE_BYTES,
 ) -> dict[str, Any]:
-    """入参：地址、token、请求体（None 表示 GET）。出参：JSON 响应。失败时抛 RemoteError。"""
+    """入参：地址、token、请求体（None 表示 GET）。出参：JSON 响应。任何失败都抛 RemoteError。
+
+    响应体有大小上限：服务器异常或被入侵时，不能让钩子无限读下去。
+    """
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if token:
@@ -65,15 +83,20 @@ def http_json(
     context = ssl.create_default_context(cafile=ca_file) if ca_file else None
     try:
         with urllib.request.urlopen(request, timeout=timeout_s, context=context) as response:
-            body = json.loads(response.read())
+            raw = response.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise RemoteError("服务器的响应超过大小上限")
+        body = json.loads(raw)
     except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", "replace")[:300]
+        detail = error.read(2000).decode("utf-8", "replace")[:300]
         hint = "检查 token 是否与服务器一致" if error.code == 401 else None
-        raise RemoteError(f"服务器拒绝了请求（HTTP {error.code}）: {detail}", hint=hint) from error
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise RemoteError(
+            f"服务器拒绝了请求（HTTP {error.code}）: {detail}", hint=hint, status=error.code
+        ) from error
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
         raise RemoteError(f"无法连接服务器 {url}: {error}") from error
-    except json.JSONDecodeError as error:
-        raise RemoteError("服务器返回的不是 JSON") from error
+    except ValueError as error:
+        raise RemoteError("服务器返回的不是合法 JSON") from error
     if not isinstance(body, dict):
         raise RemoteError("服务器返回的结构不合法")
     return body
@@ -212,11 +235,34 @@ def _save_upload_state(files: dict[str, dict[str, Any]]) -> None:
     atomic_write_text(_state_file(), json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
+@contextlib.contextmanager
+def _upload_lock() -> Any:
+    """本机同一时刻只允许一个进程读改写上传进度。拿不到锁时产出 False，调用方本次跳过。"""
+    path = client_dir() / "upload.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import fcntl
+    except ImportError:  # 非 POSIX 平台没有 flock，退回到不加锁。
+        yield True
+        return
+    with path.open("w") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def _message(item: IngestItem) -> dict[str, Any]:
+    # 服务器单条事件只存 8 KB，超出的部分传上去也会被截掉。
     message: dict[str, Any] = {
         "role": KIND_ROLES.get(item.kind, "tool"),
         "kind": item.kind,
-        "content": item.content,
+        "content": item.content[:MAX_UPLOAD_CONTENT_CHARS],
     }
     if item.ts:
         message["ts"] = item.ts
@@ -252,29 +298,46 @@ def upload_transcript(
     final_session = safe_session_id(str(scan.session_id or path.stem))
     resolved_project = project or entry.get("project")
     uploaded = 0
+    dropped = 0
     committed = resume_offset(path, entry)
     error: RemoteError | None = None
     batch: list[dict[str, Any]] = []
     batch_bytes = 0
+    batch_start = committed
     batch_end = committed
 
     def flush() -> None:
-        nonlocal batch, batch_bytes, committed, uploaded
+        nonlocal batch, batch_bytes, committed, uploaded, dropped, batch_start
         if not batch:
             committed = batch_end
+            batch_start = batch_end
             return
-        payload: dict[str, Any] = {"session_id": final_session, "messages": batch}
+        # batch_id 由「哪个文件的哪一段」决定。请求超时后重发同一段时，服务器据此识别并跳过。
+        digest = hashlib.sha256(f"{key}:{batch_start}:{batch_end}".encode()).hexdigest()
+        payload: dict[str, Any] = {
+            "session_id": final_session,
+            "messages": batch,
+            "batch_id": digest[:32],
+        }
         if resolved_project:
             payload["project"] = resolved_project
-        settings.post("/ingest", payload)
-        uploaded += len(batch)
+        try:
+            settings.post("/ingest", payload)
+            uploaded += len(batch)
+        except RemoteError as failure:
+            if failure.status not in POISON_STATUS:
+                raise
+            dropped += len(batch)
         committed = batch_end
+        batch_start = batch_end
         batch, batch_bytes = [], 0
 
     try:
         for line_end, items in scan.lines:
             messages = [_message(item) for item in items]
-            size = sum(len(message["content"].encode("utf-8")) for message in messages)
+            size = sum(
+                len(json.dumps(message, ensure_ascii=False).encode("utf-8")) for message in messages
+            )
             if batch and (
                 len(batch) + len(messages) > UPLOAD_BATCH_MESSAGES
                 or batch_bytes + size > UPLOAD_BATCH_BYTES
@@ -302,6 +365,8 @@ def upload_transcript(
         "uploaded": uploaded,
         "pending": error is not None,
     }
+    if dropped:
+        result["dropped"] = dropped
     if error is not None:
         result["error"] = error.message
     return result
@@ -319,6 +384,16 @@ def upload_hook_payload(settings: RemoteSettings, payload: dict[str, Any]) -> di
         return None
     if not isinstance(raw_path, str) or not Path(raw_path).expanduser().is_file():
         return None
+    with _upload_lock() as acquired:
+        if not acquired:
+            # 另一个钩子进程正在上传。本次跳过，下一次钩子会从记录的位置接着传。
+            return {"uploaded": 0, "pending": False, "busy": True, "retried": 0}
+        return _upload_locked(settings, payload, raw_path, cwd)
+
+
+def _upload_locked(
+    settings: RemoteSettings, payload: dict[str, Any], raw_path: str, cwd: Path | None
+) -> dict[str, Any]:
     files = _load_upload_state()
     session = payload.get("session_id")
     current = str(Path(raw_path).expanduser().resolve())
@@ -404,4 +479,4 @@ def recall_for_prompt(settings: RemoteSettings, payload: dict[str, Any]) -> str:
     if state_path is not None:
         seen.extend(str(hit.get("id")) for hit in hits if isinstance(hit, dict))
         atomic_write_text(state_path, json.dumps(seen[-MAX_RECALL_IDS:]) + "\n")
-    return rendered
+    return rendered[:MAX_INJECT_CHARS]
