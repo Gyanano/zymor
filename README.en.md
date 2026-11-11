@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
-[![Version](https://img.shields.io/badge/Version-v0.5.0-brightgreen)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v0.6.0-brightgreen)](CHANGELOG.md)
 [![PyPI](https://img.shields.io/pypi/v/zymor)](https://pypi.org/project/zymor/)
 [![CI](https://github.com/Gyanano/zymor/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyanano/zymor/actions/workflows/ci.yml)
 ![Storage](https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-4b8bbe)
@@ -22,7 +22,7 @@
 
 ## Status
 
-**v0.5.0 — memory kernel, Memory Loop, Interop and Agent Experience are complete.** The current implementation covers:
+**v0.6.0 — adds automatic conversation capture, cloud mode and cloud sync.** The current implementation covers:
 
 - **Memory kernel**: L0 event stream, L1 focus, L2 capsules, L3 knowledge nodes, L4 persona facets;
 - **Retrieval and context**: FTS5 with identifier subtokens, scoring/filtering, progressive disclosure, ATLAS/catalog;
@@ -31,7 +31,10 @@
 - **Memory Loop**: rule-check/repair loop, file capture, dream history and `--watch`, stats health metrics;
 - **Interop**: bundle export/import, `MemoryAdapter` contract, portable node format;
 - **Agent Experience**: Harness Hook/Skill contract, local read-only panel;
-- **MCP server**: stdio / Streamable HTTP, read-write and read-only modes;
+- **Conversation capture**: Claude Code hooks, transcript import, HTTP push; secrets are redacted before storage;
+- **Cloud mode**: `zymor connect` once, then every machine uploads conversations and recalls relevant memories per message; distillation runs on the server (see `docs/guide/cloud.md`, Chinese);
+- **Cloud sync**: `zymor sync` incrementally syncs knowledge nodes; `sync mirror` downloads a read-only copy;
+- **MCP server**: stdio / Streamable HTTP (optional TLS), read-write and read-only modes;
 - **Long-term memory**: cross-project L3 promotion, `projects` provenance, file/dependency/API-version anchors, stale exclusion, optional embedding semantic search and hybrid retrieval, `memory_rules` and `memory_rule_check`.
 
 ## Why Zymor

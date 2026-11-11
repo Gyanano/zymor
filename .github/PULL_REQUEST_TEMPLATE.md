@@ -14,7 +14,7 @@ Closes #
 
 ```bash
 uv sync --extra dev
-uv run pytest tests/test_open_smoke.py -q
+uv run pytest -q
 uv run ruff check src tests
 uv run mypy src/zymor
 ```
