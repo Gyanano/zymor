@@ -45,7 +45,7 @@ pending publisher 在第一次成功发布前不会占用项目名；发布成�
 
    ```bash
    uv sync --extra dev
-   uv run pytest tests/test_open_smoke.py -q
+   uv run pytest -q
    uv run ruff check src tests
    uv run mypy src/zymor
    uv build

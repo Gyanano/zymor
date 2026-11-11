@@ -11,7 +11,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-Server-6f42c1)](https://modelcontextprotocol.io/)
-[![Version](https://img.shields.io/badge/Version-v0.5.0-brightgreen)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v0.6.0-brightgreen)](CHANGELOG.md)
 [![PyPI](https://img.shields.io/pypi/v/zymor)](https://pypi.org/project/zymor/)
 [![CI](https://github.com/Gyanano/zymor/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyanano/zymor/actions/workflows/ci.yml)
 ![Storage](https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-4b8bbe)
@@ -22,7 +22,7 @@
 
 ## 状态
 
-**v0.5.0 — 记忆内核、Memory Loop、Interop 与 Agent Experience 已完成。** 当前实现覆盖：
+**v0.6.0 — 新增对话自动捕获、云端模式与云端同步。** 当前实现覆盖：
 
 - **记忆内核**：L0 事件流、L1 焦点、L2 胶囊、L3 知识节点、L4 人格 facet；
 - **检索与上下文**：FTS5 + 标识符子词、评分/过滤、渐进披露、ATLAS/catalog；
@@ -31,7 +31,10 @@
 - **Memory Loop**：规则检查/修复闭环、文件捕获、dream 历史与 `--watch`、stats 健康指标；
 - **互操作**：bundle 导出/导入、`MemoryAdapter` 契约、可移植节点格式；
 - **Agent Experience**：Harness Hook/Skill 契约、本地只读面板；
-- **MCP Server**：stdio / Streamable HTTP，读写与只读模式；
+- **对话捕获**：Claude Code 钩子、对话文件导入、HTTP 推送；写入前脱敏；
+- **云端模式**：`zymor connect` 一次接入，各台电脑自动上传对话、按消息自动取回相关记忆，提炼在服务器完成；
+- **云端同步**：`zymor sync` 增量同步知识节点，`sync mirror` 下载只读副本；
+- **MCP Server**：stdio / Streamable HTTP（可启用 TLS），读写与只读模式；
 - **长期记忆**：跨项目 L3 晋升、`projects` provenance、文件/依赖/API 版本锚点、stale 排除、可选 embedding 语义检索与混合检索、`memory_rules` 与 `memory_rule_check`。
 
 ## 为什么是 Zymor
