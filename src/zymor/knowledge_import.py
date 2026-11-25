@@ -15,6 +15,7 @@ from zymor.util.yamlutil import split_frontmatter
 
 _CHATGPT_MEMBER = re.compile(r"conversations(?:[-_]?\d+)?\.json", re.IGNORECASE)
 _SENTENCE_BREAK = re.compile(r"(?<=[。！？!?])|(?<=\.)\s+|\n")
+_MARKDOWN_LIST_PREFIX = re.compile(r"^(?:[-+*]|\d+[.)])[ \t]+")
 
 
 @dataclass(frozen=True)
@@ -216,30 +217,39 @@ def distill_shared_statement(
     base_revision: int = 0,
 ) -> int:
     """提取多份材料中共同出现的一条原句，提交待审提案。"""
-    groups: dict[str, dict[tuple[str, str], EvidenceReference]] = {}
+    groups: dict[str, tuple[str, dict[tuple[str, str], EvidenceReference]]] = {}
     needle = query.strip().casefold()
     for hit in store.search_sources(query, limit=None):
         source_key = (hit["source_kind"], hit["source_key"])
         for part in _SENTENCE_BREAK.split(hit["text"]):
-            sentence = part.strip()
-            folded = sentence.casefold()
-            if needle not in folded or sentence.startswith(("#", "```", "~~~")):
+            quote = part.strip()
+            if quote.startswith(("#", "```", "~~~")):
                 continue
-            group = groups.setdefault(folded, {})
+            statement = (
+                _MARKDOWN_LIST_PREFIX.sub("", quote) if hit["source_kind"] == "document" else quote
+            )
+            folded = statement.casefold()
+            if needle not in folded:
+                continue
+            _, group = groups.setdefault(folded, (statement, {}))
             group.setdefault(
                 source_key,
-                EvidenceReference(hit["source_id"], hit["locator"], sentence),
+                EvidenceReference(hit["source_id"], hit["locator"], quote),
             )
-    shared = [tuple(group.values()) for group in groups.values() if len(group) >= 2]
+    shared = [
+        (statement, tuple(group.values()))
+        for statement, group in groups.values()
+        if len(group) >= 2
+    ]
     if not shared:
         raise NotFoundError("没有找到同时出现在至少两份材料中的同一句结论")
     if len(shared) > 1:
         raise ValidationError("找到多条共有结论，请用更具体的查询词逐条提案", field="query")
-    references = shared[0]
+    statement, references = shared[0]
     primary = references[0]
     return store.propose(
         item_id,
-        statement=primary.quote,
+        statement=statement,
         source_id=primary.source_id,
         evidence=primary.quote,
         base_revision=base_revision,

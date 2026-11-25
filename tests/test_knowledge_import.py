@@ -67,10 +67,10 @@ def test_import_search_dedup_and_review_shared_evidence(
     vault = tmp_path / "Obsidian Test"
     vault.mkdir()
     (vault / "maintenance.md").write_text(f"# 维护安排\n\n{CLAIM}\n", encoding="utf-8")
-    (vault / "handover.md").write_text(f"# 交接记录\n\n{CLAIM}\n", encoding="utf-8")
+    (vault / "handover.md").write_text(f"# 交接记录\n\n- {CLAIM}\n", encoding="utf-8")
     (vault / "platform.md").write_text("# 站台说明\n\n站台时钟使用模拟时间。\n", encoding="utf-8")
 
-    initial = _run(database, capsys, "import", str(export), str(vault))
+    initial = _run(database, capsys, "import", str(vault), str(export))
     assert (initial["added"], initial["duplicates"], initial["issues"]) == (5, 0, [])
     unpacked = tmp_path / "renamed-conversation-export.json"
     unpacked.write_text(json.dumps([other_chat, chat], ensure_ascii=False), encoding="utf-8")
@@ -84,14 +84,15 @@ def test_import_search_dedup_and_review_shared_evidence(
 
     hits = _run(database, capsys, "search-sources", "虚构蓝线每周五")["hits"]
     assert {row["source_kind"] for row in hits} == {"dialogue", "document"}
-    assert [row["locator"] for row in hits] == ["message:answer:part:1", "L3-L3", "L3-L3"]
+    assert [row["locator"] for row in hits] == ["L3-L3", "L3-L3", "message:answer:part:1"]
+    assert hits[0]["text"] == f"- {CLAIM}"
     for hit in hits:
-        assert hit["text"] == CLAIM
+        assert hit["text"].removeprefix("- ") == CLAIM
         source = _run(database, capsys, "source", str(hit["source_id"]))
         if hit["source_kind"] == "dialogue":
             assert json.loads(source["content"]) == chat
         else:
-            assert source["content"].splitlines()[2] == CLAIM
+            assert source["content"].splitlines()[2] == hit["text"]
     assert _run(database, capsys, "search-sources", "仅用于验证文件选择")["hits"] == []
 
     draft = _run(
@@ -113,6 +114,11 @@ def test_import_search_dedup_and_review_shared_evidence(
     new = _run(database, capsys, "import", str(vault))
     assert (new["added"], new["duplicates"]) == (1, 2)
     assert len(_run(database, capsys, "search-sources", "虚构蓝线每周五")["hits"]) == 2
+    assert _run(database, capsys, "show", "blue-line", "--evidence")["evidence_refs"] == references
+    (vault / "maintenance.md").write_text(f"# 维护安排\n\n{CLAIM}\n", encoding="utf-8")
+    restored = _run(database, capsys, "import", str(vault))
+    assert (restored["added"], restored["duplicates"]) == (0, 3)
+    assert _run(database, capsys, "search-sources", "虚构蓝线每周五")["hits"] == hits
     assert _run(database, capsys, "show", "blue-line", "--evidence")["evidence_refs"] == references
 
 
@@ -182,3 +188,30 @@ def test_batch_upgrades_an_existing_pilot_and_reports_unusable_inputs(
     )
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_import_indexes_preexisting_capture_and_upgrades_indexed_snapshots(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "batch.sqlite3"
+    chat = _conversation("previously-captured", "原有对话", CLAIM)
+    raw = tmp_path / "raw.txt"
+    raw.write_text(json.dumps(chat, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    _run(database, capsys, "init")
+    original = _run(database, capsys, "capture", str(raw), "--key", "chatgpt:previously-captured")
+    archive = tmp_path / "conversations.json"
+    archive.write_text(json.dumps([chat], ensure_ascii=False), encoding="utf-8")
+    imported = _run(database, capsys, "import", str(archive))
+    assert (imported["added"], imported["duplicates"]) == (0, 1)
+    hits = _run(database, capsys, "search-sources", "虚构蓝线每周五")["hits"]
+    assert [hit["source_id"] for hit in hits] == [original["source_id"]]
+
+    raw.write_text("仅作临时采集的另一份正文。", encoding="utf-8")
+    _run(database, capsys, "capture", str(raw), "--key", "chatgpt:previously-captured")
+    assert _run(database, capsys, "search-sources", "虚构蓝线每周五")["hits"] == hits
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("DROP TABLE current_sources")
+        connection.execute("PRAGMA user_version = 1")
+    assert _run(database, capsys, "search-sources", "虚构蓝线每周五")["hits"] == hits
+    _run(database, capsys, "init")
+    assert _run(database, capsys, "search-sources", "虚构蓝线每周五")["hits"] == hits

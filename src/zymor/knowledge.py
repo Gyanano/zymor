@@ -14,7 +14,7 @@ from zymor.util.fs import sha256_hex
 from zymor.util.time import now_iso
 
 _APPLICATION_ID = 0x5A594D32
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _ITEM_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _SOURCE_COLUMNS = """
         id INTEGER PRIMARY KEY,
@@ -72,6 +72,14 @@ _IMPORT_SCHEMA = (
     )
     """,
 )
+_CURRENT_SOURCES_SCHEMA = """
+    CREATE TABLE current_sources (
+        kind TEXT NOT NULL,
+        source_key TEXT NOT NULL,
+        source_id INTEGER NOT NULL UNIQUE REFERENCES sources(id),
+        PRIMARY KEY (kind, source_key)
+    )
+"""
 
 
 @dataclass(frozen=True)
@@ -109,24 +117,37 @@ class KnowledgeStore:
                 version = _schema_version(connection)
                 if version == _SCHEMA_VERSION:
                     return
-                if version != 0:
+                if version not in (0, 1):
                     raise ValidationError("当前版本无法打开该知识试点库", field="db")
-                connection.execute(f"CREATE TABLE sources_upgrade ({_SOURCE_COLUMNS})")
-                connection.execute(
-                    "INSERT INTO sources_upgrade"
-                    " (id, kind, source_key, sha256, content, captured_at)"
-                    " SELECT id, kind, source_key, sha256, content, captured_at FROM sources"
-                )
-                connection.execute("DROP TABLE sources")
-                connection.execute("ALTER TABLE sources_upgrade RENAME TO sources")
+                if version == 0:
+                    connection.execute(f"CREATE TABLE sources_upgrade ({_SOURCE_COLUMNS})")
+                    connection.execute(
+                        "INSERT INTO sources_upgrade"
+                        " (id, kind, source_key, sha256, content, captured_at)"
+                        " SELECT id, kind, source_key, sha256, content, captured_at FROM sources"
+                    )
+                    connection.execute("DROP TABLE sources")
+                    connection.execute("ALTER TABLE sources_upgrade RENAME TO sources")
             else:
                 if marker or connection.execute("SELECT 1 FROM sqlite_schema LIMIT 1").fetchone():
                     raise ValidationError("请为知识试点选择独立数据库", field="db")
                 for statement in _SCHEMA:
                     connection.execute(statement)
                 connection.execute(f"PRAGMA application_id = {_APPLICATION_ID}")
-            for statement in _IMPORT_SCHEMA:
-                connection.execute(statement)
+                version = 0
+            if version == 0:
+                for statement in _IMPORT_SCHEMA:
+                    connection.execute(statement)
+            connection.execute(_CURRENT_SOURCES_SCHEMA)
+            connection.execute(
+                """
+                INSERT INTO current_sources (kind, source_key, source_id)
+                SELECT s.kind, s.source_key, max(s.id)
+                FROM sources s
+                WHERE EXISTS (SELECT 1 FROM source_fragments f WHERE f.source_id = s.id)
+                GROUP BY s.kind, s.source_key
+                """
+            )
             if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise ValidationError("知识试点库的来源或版本引用无法核对", field="db")
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
@@ -194,12 +215,21 @@ class KnowledgeStore:
                 "SELECT id FROM sources WHERE kind = ? AND source_key = ? AND sha256 = ?", identity
             ).fetchone()
             source_id = int(row["id"])
-            if insertion.rowcount == 1 and fragments:
-                connection.execute("UPDATE sources SET title = ? WHERE id = ?", (title, source_id))
+            if fragments:
+                connection.execute(
+                    "UPDATE sources SET title = ? WHERE id = ? AND title IS NULL",
+                    (title, source_id),
+                )
                 connection.executemany(
                     "INSERT INTO source_fragments (source_id, position, locator, text)"
-                    " VALUES (?, ?, ?, ?)",
+                    " VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
                     [(source_id, index, *fragment) for index, fragment in enumerate(fragments)],
+                )
+                connection.execute(
+                    "INSERT INTO current_sources (kind, source_key, source_id) VALUES (?, ?, ?)"
+                    " ON CONFLICT (kind, source_key) DO UPDATE SET source_id = excluded.source_id"
+                    " WHERE current_sources.source_id <> excluded.source_id",
+                    (kind, source_key, source_id),
                 )
             return source_id, insertion.rowcount == 1
 
@@ -208,19 +238,26 @@ class KnowledgeStore:
         if not query or (limit is not None and limit < 1):
             raise ValidationError("请输入查询词和正整数条数", field="query")
         with self._connect() as connection:
-            if _schema_version(connection) == 0:
+            version = _schema_version(connection)
+            if version == 0:
                 return []
-            rows = connection.execute(
+            is_current = "s.id IN (SELECT source_id FROM current_sources)"
+            if version == 1:
+                is_current = """
+                    NOT EXISTS (
+                        SELECT 1 FROM sources newer
+                        JOIN source_fragments nf ON nf.source_id = newer.id
+                        WHERE newer.kind = s.kind AND newer.source_key = s.source_key
+                          AND newer.id > s.id
+                    )
                 """
+            rows = connection.execute(
+                f"""
                 SELECT s.id AS source_id, s.kind AS source_kind, s.source_key, s.title,
                        f.locator, f.text
                 FROM source_fragments f JOIN sources s ON s.id = f.source_id
                 WHERE instr(lower(f.text), lower(?)) > 0
-                  AND NOT EXISTS (
-                      SELECT 1 FROM sources newer
-                      WHERE newer.kind = s.kind AND newer.source_key = s.source_key
-                        AND newer.id > s.id
-                  )
+                  AND {is_current}
                 ORDER BY s.id, f.position
                 LIMIT ?
                 """,
