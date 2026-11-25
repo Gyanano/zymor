@@ -16,6 +16,8 @@ from zymor.config import Config, load_config
 from zymor.dream.engine import run_dream
 from zymor.dream.state import seq_floor
 from zymor.errors import NotFoundError, UsageError, ZymorError
+from zymor.knowledge_cli import configure_parser as configure_knowledge_parser
+from zymor.knowledge_cli import run_knowledge
 from zymor.maintenance import (
     confirm_persona_draft,
     forget_node,
@@ -286,6 +288,9 @@ def build_parser() -> argparse.ArgumentParser:
     mcp.add_argument("--tls-cert", default=None, metavar="PEM", help="TLS 证书链文件")
     mcp.add_argument("--tls-key", default=None, metavar="PEM", help="TLS 私钥文件")
     mcp.add_argument("--read-only", action="store_true", help="只读模式：不下发写工具")
+
+    knowledge = sub.add_parser("knowledge", help="单用户知识与文章试点")
+    configure_knowledge_parser(knowledge)
 
     return parser
 
@@ -1552,6 +1557,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         "hook": cmd_hook,
         "panel": cmd_panel,
         "mcp": cmd_mcp,
+        "knowledge": run_knowledge,
     }
     handler = handlers.get(command)
     if handler is None:

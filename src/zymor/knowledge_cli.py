@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+from zymor.errors import NotFoundError, UsageError, UserError, ZymorError
+from zymor.knowledge import KnowledgeStore
+from zymor.knowledge_view import export_markdown, propose_article_edit
+
+
+def configure_parser(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--db", metavar="PATH", type=Path, required=True, help="独立试点数据库")
+    sub = parser.add_subparsers(dest="knowledge_action", required=True)
+    sub.add_parser("init", help="初始化独立试点库")
+
+    capture = sub.add_parser("capture", help="归档一份 UTF-8 对话原文")
+    capture.add_argument("file", type=Path)
+    capture.add_argument("--key", required=True, help="对话稳定标识")
+
+    propose = sub.add_parser("propose", help="从原文提交待审知识")
+    propose.add_argument("item_id")
+    propose.add_argument("--title", help="创建条目时指定标题")
+    propose.add_argument("--statement", required=True)
+    propose.add_argument("--source", type=int, required=True)
+    propose.add_argument("--evidence", required=True, help="来源中的精确摘录")
+    propose.add_argument("--base-revision", type=int, default=0)
+
+    article = sub.add_parser("propose-article", help="从文章编辑稿提交待审更正")
+    article.add_argument("file", type=Path)
+    article.add_argument("--statement", required=True, help="从编辑稿正文选中的新结论")
+
+    review = sub.add_parser("review", help="查看提案和来源")
+    review.add_argument("proposal_id", type=int)
+
+    approve = sub.add_parser("approve", help="由所有者核准一个提案")
+    approve.add_argument("proposal_id", type=int)
+    approve.add_argument("--markdown-dir", type=Path, help="核准后更新目录中的 Markdown")
+
+    show = sub.add_parser("show", help="查看当前核准版本")
+    show.add_argument("item_id")
+
+    export = sub.add_parser("export", help="重新生成当前核准版本的 Markdown")
+    export.add_argument("item_id")
+    export.add_argument("directory", type=Path)
+
+    sub.add_parser("mcp", help="启动本地只读 MCP")
+
+
+def run_knowledge(args: argparse.Namespace) -> int:
+    store = KnowledgeStore(args.db)
+    try:
+        result = _run(store, args)
+    except sqlite3.Error as error:
+        raise UserError(f"知识试点数据库操作失败：{error}") from error
+    if result is not None:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _run(store: KnowledgeStore, args: argparse.Namespace) -> dict[str, Any] | None:
+    match args.knowledge_action:
+        case "init":
+            store.initialize()
+            return {"database": str(store.database)}
+        case "capture":
+            source = store.capture("dialogue", args.key, args.file.read_text(encoding="utf-8-sig"))
+            return {"source_id": source}
+        case "propose":
+            proposal = store.propose(
+                args.item_id,
+                title=args.title,
+                statement=args.statement,
+                source_id=args.source,
+                evidence=args.evidence,
+                base_revision=args.base_revision,
+            )
+            return {"proposal_id": proposal, "status": "pending"}
+        case "propose-article":
+            return {
+                "proposal_id": propose_article_edit(store, args.file, args.statement),
+                "status": "pending",
+            }
+        case "review":
+            return store.review(args.proposal_id)
+        case "approve":
+            approved = store.approve(args.proposal_id)
+            result = asdict(approved)
+            if args.markdown_dir is not None:
+                try:
+                    result["markdown"] = str(
+                        export_markdown(store, approved.item_id, args.markdown_dir)
+                    )
+                except (OSError, UnicodeError, sqlite3.Error, ZymorError) as error:
+                    raise UserError(
+                        f"已核准版本 {approved.revision}，Markdown 更新失败：{error}",
+                        hint="排除文件问题后用 knowledge export 重试",
+                    ) from error
+            return result
+        case "show":
+            revision = store.read(args.item_id)
+            if revision is None:
+                raise NotFoundError(f"找不到已核准条目 {args.item_id}")
+            return asdict(revision)
+        case "export":
+            return {"markdown": str(export_markdown(store, args.item_id, args.directory))}
+        case "mcp":
+            _serve_mcp(store)
+            return None
+        case _:
+            raise UsageError(f"未知知识试点命令：{args.knowledge_action}")
+
+
+def _serve_mcp(store: KnowledgeStore) -> None:
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
+    from mcp.types import ToolAnnotations
+
+    server = MCPServer(name="zymor-knowledge", description="单人知识试点的当前核准版本")
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+    def knowledge_get(item_id: str) -> dict[str, Any]:
+        """Look up the current approved knowledge item by its stable item_id."""
+        try:
+            revision = store.read(item_id)
+        except ZymorError as error:
+            raise ToolError(error.message) from None
+        except sqlite3.Error:
+            raise ToolError("当前核准版本暂不可用") from None
+        if revision is None:
+            return {"found": False, "item_id": item_id}
+        return {"found": True, **asdict(revision)}
+
+    server.run("stdio")
