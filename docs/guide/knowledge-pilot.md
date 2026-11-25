@@ -28,11 +28,11 @@ zymor knowledge --db ./pilot.sqlite3 review 2
 zymor knowledge --db ./pilot.sqlite3 approve 2 --markdown-dir ./obsidian-test/Zymor
 ```
 
-审核期间，两个客户端及已生成的笔记仍读取第 1 版。核准后再次查询会获得第 2 版，Obsidian 读取同路径更新的笔记。基于旧版本的另一份提案须重新比较。把网站或 Obsidian 的手工稿放在独立位置，可同时保留文章编辑和系统生成的视图。
+审核期间，两个客户端及已生成的笔记仍读取第 1 版。核准后再次查询会获得第 2 版，Obsidian 读取同路径更新的笔记。基于旧版本的另一份提案须重新比较。把网站或 Obsidian 的手工稿放在独立位置，可同时保留文章编辑和系统生成的视图。生成器会在替换文件前复查目标内容，发现手工改动时保留文件并提示换目录。
 
 ## 使用范围
 
 - 以独立试点库、手工选段、按 ID 查询和本地 Markdown 为当前验证范围。网站通过编辑副本模拟回传。
 - 所有者运行核准命令。MCP 客户端仅获得当前核准条目的读工具。试点使用测试内容和专用笔记目录，沿用 v0.6 的用户可在各自 vault 中继续使用原命令。
-- 版本提交与文件生成各自有结果。若写文件失败，已核准版本可继续查询。保留手工稿，再用 `zymor knowledge --db PATH export ITEM DIRECTORY` 重新生成。
+- 核准回执的 `revision` 对应该提案的版本，`markdown_revision` 对应实际生成的当前笔记版本。若写文件失败，已核准版本可继续查询。保留手工稿，再用 `zymor knowledge --db PATH export ITEM DIRECTORY` 重新生成。
 - 站点接入时应选择可公开的条目。一个专题可关联多条知识版本，站点内容由编辑者维护。后续回传以逐条提交提案为入口。

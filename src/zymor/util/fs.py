@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 
-def atomic_write_text(path: Path, text: str) -> None:
-    """入参：目标路径与 UTF-8 文本。出参：无。同目录临时文件 + fsync + 原子替换。"""
+def atomic_write_text(
+    path: Path, text: str, *, before_replace: Callable[[], None] | None = None
+) -> None:
+    """将 UTF-8 文本写入临时文件，并在原子替换前运行可选检查。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     data = text.encode("utf-8")
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -17,6 +20,8 @@ def atomic_write_text(path: Path, text: str) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)

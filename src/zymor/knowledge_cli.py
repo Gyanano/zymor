@@ -91,14 +91,14 @@ def _run(store: KnowledgeStore, args: argparse.Namespace) -> dict[str, Any] | No
             result = asdict(approved)
             if args.markdown_dir is not None:
                 try:
-                    result["markdown"] = str(
-                        export_markdown(store, approved.item_id, args.markdown_dir)
-                    )
+                    publication = export_markdown(store, approved.item_id, args.markdown_dir)
                 except (OSError, UnicodeError, sqlite3.Error, ZymorError) as error:
                     raise UserError(
                         f"已核准版本 {approved.revision}，Markdown 更新失败：{error}",
                         hint="排除文件问题后用 knowledge export 重试",
                     ) from error
+                result["markdown"] = str(publication.path)
+                result["markdown_revision"] = publication.revision
             return result
         case "show":
             revision = store.read(args.item_id)
@@ -106,7 +106,8 @@ def _run(store: KnowledgeStore, args: argparse.Namespace) -> dict[str, Any] | No
                 raise NotFoundError(f"找不到已核准条目 {args.item_id}")
             return asdict(revision)
         case "export":
-            return {"markdown": str(export_markdown(store, args.item_id, args.directory))}
+            publication = export_markdown(store, args.item_id, args.directory)
+            return {"markdown": str(publication.path), "markdown_revision": publication.revision}
         case "mcp":
             _serve_mcp(store)
             return None

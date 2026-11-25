@@ -7,10 +7,12 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
+import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.types import CallToolResult
 
+from zymor import knowledge_view
 from zymor.cli import main
 
 ITEM = "pilot-schedule"
@@ -116,7 +118,10 @@ def test_knowledge_pilot_cli_updates_two_connected_mcp_clients_and_markdown(
 
             update = _invoke(database, capsys, "approve", second_id, "--markdown-dir", str(notes))
             assert update["revision"] == 2
+            assert update["markdown_revision"] == 2
             assert _invoke(database, capsys, "approve", second_id)["revision"] == 2
+            replay = _invoke(database, capsys, "approve", first_id, "--markdown-dir", str(notes))
+            assert (replay["revision"], replay["markdown_revision"]) == (1, 2)
             await read_both(2, CORRECTED)
             final_markdown = note.read_text(encoding="utf-8")
             assert "zymor_revision: 2" in final_markdown and CORRECTED in final_markdown
@@ -164,3 +169,32 @@ def test_article_conflict_and_publication_retry_preserve_human_edits(
     corrected_notes = tmp_path / "regenerated"
     path = _invoke(database, capsys, "export", ITEM, str(corrected_notes))["markdown"]
     assert CORRECTED in Path(path).read_text(encoding="utf-8")
+
+
+def test_projection_preserves_edit_detected_before_replacing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "pilot.sqlite3"
+    first_id = _draft_from_dialogue(database, capsys, tmp_path)
+    notes = tmp_path / "notes"
+    _invoke(database, capsys, "approve", first_id, "--markdown-dir", str(notes))
+    note = notes / f"zymor-{ITEM}.md"
+    original = note.read_text(encoding="utf-8")
+    edited = original + "\n生成期间的人工修改。\n"
+    draft = tmp_path / "website-edit.md"
+    draft.write_text(original.replace(ORIGINAL, CORRECTED), encoding="utf-8")
+    receipt = _invoke(database, capsys, "propose-article", str(draft), "--statement", CORRECTED)
+    write_markdown = knowledge_view.atomic_write_text
+
+    def edit_before_replace(path: Path, text: str, **kwargs: Any) -> None:
+        path.write_text(edited, encoding="utf-8")
+        write_markdown(path, text, **kwargs)
+
+    monkeypatch.setattr(knowledge_view, "atomic_write_text", edit_before_replace)
+    result = _invoke(
+        database, capsys, "approve", str(receipt["proposal_id"]),
+        "--markdown-dir", str(notes), expected_code=1,
+    )
+    assert "目标笔记在生成期间发生变化" in result["message"]
+    assert note.read_text(encoding="utf-8") == edited
+    assert _invoke(database, capsys, "show", ITEM)["revision"] == 2

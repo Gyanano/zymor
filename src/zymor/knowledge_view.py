@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from zymor.errors import ValidationError
 from zymor.knowledge import KnowledgeStore, Revision
 from zymor.util.fs import atomic_write_text
 from zymor.util.yamlutil import dump_yaml, split_frontmatter
+
+
+@dataclass(frozen=True)
+class MarkdownPublication:
+    path: Path
+    revision: int
 
 
 def render_markdown(revision: Revision) -> str:
@@ -19,17 +26,16 @@ def render_markdown(revision: Revision) -> str:
     return f"---\n{metadata}---\n\n# {revision.title}\n\n{revision.statement}\n"
 
 
-def export_markdown(store: KnowledgeStore, item_id: str, directory: Path) -> Path:
+def export_markdown(store: KnowledgeStore, item_id: str, directory: Path) -> MarkdownPublication:
     """生成用于阅读的 Markdown。检测到手工修改时保留现有文件。"""
     with store.publication_snapshot(item_id) as current:
         target = directory / f"zymor-{current.item_id}.md"
+        publication = MarkdownPublication(target, current.revision)
         expected = render_markdown(current)
-        if target.is_symlink():
-            raise ValidationError("请为生成的笔记选择普通文件路径", field="directory")
-        if target.exists():
-            existing = target.read_text(encoding="utf-8")
-            if existing == expected:
-                return target
+        existing = _existing_markdown(target)
+        if existing == expected:
+            return publication
+        if existing is not None:
             metadata, _ = split_frontmatter(existing)
             previous_item, previous_revision = _article_reference(metadata)
             previous = (
@@ -41,8 +47,26 @@ def export_markdown(store: KnowledgeStore, item_id: str, directory: Path) -> Pat
                     field="directory",
                     hint="保留手工稿，选择新的生成目录，或先把手工稿另存为提案来源",
                 )
-        atomic_write_text(target, expected)
-        return target
+
+        def check_before_replace() -> None:
+            if _existing_markdown(target) != existing:
+                raise ValidationError(
+                    "目标笔记在生成期间发生变化",
+                    field="directory",
+                    hint="保留当前笔记，再指定独立目录生成知识视图",
+                )
+
+        atomic_write_text(target, expected, before_replace=check_before_replace)
+        return publication
+
+
+def _existing_markdown(target: Path) -> str | None:
+    if target.is_symlink():
+        raise ValidationError("请为生成的笔记选择普通文件路径", field="directory")
+    try:
+        return target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
 
 
 def propose_article_edit(store: KnowledgeStore, article: Path, statement: str) -> int:
