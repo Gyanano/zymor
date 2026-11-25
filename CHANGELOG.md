@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与语义化版本。
 
+## [Unreleased]
+
+### Added
+
+- `zymor knowledge` 单用户知识试点，支持对话归档、待审提案、版本核准、只读 MCP 查询、Markdown 知识视图和文章更正回传。
+
 ## [0.6.0] - 2026-11-11
 
 ### Added
