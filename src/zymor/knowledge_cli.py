@@ -9,6 +9,7 @@ from typing import Any
 
 from zymor.errors import NotFoundError, UsageError, UserError, ZymorError
 from zymor.knowledge import KnowledgeStore
+from zymor.knowledge_import import distill_shared_statement, import_materials
 from zymor.knowledge_view import export_markdown, propose_article_edit
 
 
@@ -20,6 +21,22 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     capture = sub.add_parser("capture", help="归档一份 UTF-8 对话原文")
     capture.add_argument("file", type=Path)
     capture.add_argument("--key", required=True, help="对话稳定标识")
+
+    batch = sub.add_parser("import", help="批量归档 ChatGPT 导出与 Markdown")
+    batch.add_argument("paths", nargs="+", type=Path)
+
+    search = sub.add_parser("search-sources", help="搜索批量导入的原文")
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=20)
+
+    source = sub.add_parser("source", help="按照来源编号读取归档原文")
+    source.add_argument("source_id", type=int)
+
+    distill = sub.add_parser("distill", help="把多份原文中的共同结论提交审核")
+    distill.add_argument("item_id")
+    distill.add_argument("query", help="目标结论中的一段具体原文")
+    distill.add_argument("--title", help="创建条目时指定标题")
+    distill.add_argument("--base-revision", type=int, default=0)
 
     propose = sub.add_parser("propose", help="从原文提交待审知识")
     propose.add_argument("item_id")
@@ -42,6 +59,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
 
     show = sub.add_parser("show", help="查看当前核准版本")
     show.add_argument("item_id")
+    show.add_argument("--evidence", action="store_true", help="列出该版本引用的来源")
 
     export = sub.add_parser("export", help="重新生成当前核准版本的 Markdown")
     export.add_argument("item_id")
@@ -69,6 +87,17 @@ def _run(store: KnowledgeStore, args: argparse.Namespace) -> dict[str, Any] | No
         case "capture":
             source = store.capture("dialogue", args.key, args.file.read_text(encoding="utf-8-sig"))
             return {"source_id": source}
+        case "import":
+            return import_materials(store, args.paths)
+        case "search-sources":
+            return {"hits": store.search_sources(args.query, limit=args.limit)}
+        case "source":
+            return store.read_source(args.source_id)
+        case "distill":
+            proposal = distill_shared_statement(
+                store, args.item_id, args.query, title=args.title, base_revision=args.base_revision
+            )
+            return {"proposal_id": proposal, "status": "pending"}
         case "propose":
             proposal = store.propose(
                 args.item_id,
@@ -104,7 +133,12 @@ def _run(store: KnowledgeStore, args: argparse.Namespace) -> dict[str, Any] | No
             revision = store.read(args.item_id)
             if revision is None:
                 raise NotFoundError(f"找不到已核准条目 {args.item_id}")
-            return asdict(revision)
+            payload = asdict(revision)
+            if args.evidence:
+                payload["evidence_refs"] = store.revision_evidence(
+                    revision.item_id, revision.revision
+                )
+            return payload
         case "export":
             publication = export_markdown(store, args.item_id, args.directory)
             return {"markdown": str(publication.path), "markdown_revision": publication.revision}
