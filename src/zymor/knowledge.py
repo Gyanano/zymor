@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +15,7 @@ from zymor.util.fs import sha256_hex
 from zymor.util.time import now_iso
 
 _APPLICATION_ID = 0x5A594D32
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _ITEM_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _SOURCE_COLUMNS = """
         id INTEGER PRIMARY KEY,
@@ -117,7 +118,7 @@ class KnowledgeStore:
                 version = _schema_version(connection)
                 if version == _SCHEMA_VERSION:
                     return
-                if version not in (0, 1):
+                if version not in (0, 1, 2):
                     raise ValidationError("当前版本无法打开该知识试点库", field="db")
                 if version == 0:
                     connection.execute(f"CREATE TABLE sources_upgrade ({_SOURCE_COLUMNS})")
@@ -138,15 +139,21 @@ class KnowledgeStore:
             if version == 0:
                 for statement in _IMPORT_SCHEMA:
                     connection.execute(statement)
-            connection.execute(_CURRENT_SOURCES_SCHEMA)
+            if version < 2:
+                connection.execute(_CURRENT_SOURCES_SCHEMA)
+                connection.execute(
+                    """
+                    INSERT INTO current_sources (kind, source_key, source_id)
+                    SELECT s.kind, s.source_key, max(s.id)
+                    FROM sources s
+                    WHERE EXISTS (SELECT 1 FROM source_fragments f WHERE f.source_id = s.id)
+                    GROUP BY s.kind, s.source_key
+                    """
+                )
             connection.execute(
-                """
-                INSERT INTO current_sources (kind, source_key, source_id)
-                SELECT s.kind, s.source_key, max(s.id)
-                FROM sources s
-                WHERE EXISTS (SELECT 1 FROM source_fragments f WHERE f.source_id = s.id)
-                GROUP BY s.kind, s.source_key
-                """
+                "CREATE TABLE proposal_conflicts ("
+                "proposal_id INTEGER PRIMARY KEY REFERENCES proposals(id), "
+                "alternatives TEXT NOT NULL)"
             )
             if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise ValidationError("知识试点库的来源或版本引用无法核对", field="db")
@@ -284,6 +291,7 @@ class KnowledgeStore:
         base_revision: int = 0,
         title: str | None = None,
         references: Sequence[EvidenceReference] = (),
+        alternatives: Mapping[str, Sequence[EvidenceReference]] | None = None,
     ) -> int:
         item_id = _validate_item_id(item_id)
         statement, evidence = statement.strip(), evidence.strip()
@@ -320,6 +328,24 @@ class KnowledgeStore:
                     " VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
                     [(proposal_id, ref.source_id, ref.locator, ref.quote) for ref in references],
                 )
+            if alternatives:
+                if len(alternatives) < 2 or any(
+                    not refs or any(ref not in references for ref in refs)
+                    for refs in alternatives.values()
+                ):
+                    raise ValidationError("冲突必须包含至少两个有出处的口径")
+                grouped = {
+                    value: [
+                        {"source_id": ref.source_id, "locator": ref.locator, "quote": ref.quote}
+                        for ref in refs
+                    ]
+                    for value, refs in alternatives.items()
+                }
+                connection.execute(
+                    "INSERT INTO proposal_conflicts VALUES (?, ?)"
+                    " ON CONFLICT (proposal_id) DO UPDATE SET alternatives = excluded.alternatives",
+                    (proposal_id, json.dumps(grouped, ensure_ascii=False)),
+                )
             return proposal_id
 
     def review(self, proposal_id: int) -> dict[str, Any]:
@@ -338,6 +364,18 @@ class KnowledgeStore:
                 raise NotFoundError(f"找不到提案 {proposal_id}")
             result = dict(proposal)
             result["evidence_refs"] = _proposal_evidence(connection, proposal)
+            conflict = _conflict(connection, proposal_id)
+            if conflict:
+                for refs in conflict.values():
+                    for ref in refs:
+                        ref.update(
+                            next(
+                                evidence
+                                for evidence in result["evidence_refs"]
+                                if all(evidence[key] == value for key, value in ref.items())
+                            )
+                        )
+                result["conflict"] = conflict
             return result
 
     def revision_evidence(self, item_id: str, revision: int) -> list[dict[str, Any]]:
@@ -362,6 +400,8 @@ class KnowledgeStore:
             ).fetchone()
             if proposal is None:
                 raise NotFoundError(f"找不到提案 {proposal_id}")
+            if _conflict(connection, proposal_id):
+                raise ValidationError("请核对双方原文后另提单一口径，冲突记录不能直接核准")
             committed = connection.execute(
                 "SELECT revision, approved_at FROM revisions WHERE proposal_id = ?", (proposal_id,)
             ).fetchone()
@@ -407,6 +447,15 @@ def _validate_item_id(item_id: str) -> str:
 
 def _schema_version(connection: sqlite3.Connection) -> int:
     return int(connection.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _conflict(connection: sqlite3.Connection, proposal_id: int) -> dict[str, Any]:
+    if _schema_version(connection) < 3:
+        return {}
+    row = connection.execute(
+        "SELECT alternatives FROM proposal_conflicts WHERE proposal_id = ?", (proposal_id,)
+    ).fetchone()
+    return dict(json.loads(row[0])) if row else {}
 
 
 def _validate_evidence(

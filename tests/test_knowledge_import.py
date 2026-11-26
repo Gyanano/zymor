@@ -211,6 +211,7 @@ def test_import_indexes_preexisting_capture_and_upgrades_indexed_snapshots(
     assert _run(database, capsys, "search-sources", "虚构蓝线每周五")["hits"] == hits
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("DROP TABLE current_sources")
+        connection.execute("DROP TABLE proposal_conflicts")
         connection.execute("PRAGMA user_version = 1")
     assert _run(database, capsys, "search-sources", "虚构蓝线每周五")["hits"] == hits
     _run(database, capsys, "init")

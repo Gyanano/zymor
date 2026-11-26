@@ -10,6 +10,7 @@ from typing import Any
 from zymor.errors import NotFoundError, UsageError, UserError, ZymorError
 from zymor.knowledge import KnowledgeStore
 from zymor.knowledge_import import distill_shared_statement, import_materials
+from zymor.knowledge_semantic import propose_semantic
 from zymor.knowledge_view import export_markdown, propose_article_edit
 
 
@@ -37,6 +38,10 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     distill.add_argument("query", help="目标结论中的一段具体原文")
     distill.add_argument("--title", help="创建条目时指定标题")
     distill.add_argument("--base-revision", type=int, default=0)
+
+    semantic = sub.add_parser("distill-semantic", help="试点语义归并和冲突识别")
+    semantic.add_argument("item_prefix")
+    semantic.add_argument("query", help="用于搜集同一主题材料的原文关键词")
 
     propose = sub.add_parser("propose", help="从原文提交待审知识")
     propose.add_argument("item_id")
@@ -108,6 +113,8 @@ def _run(store: KnowledgeStore, args: argparse.Namespace) -> dict[str, Any] | No
                 base_revision=args.base_revision,
             )
             return {"proposal_id": proposal, "status": "pending"}
+        case "distill-semantic":
+            return {"proposals": propose_semantic(store, args.item_prefix, args.query)}
         case "propose-article":
             return {
                 "proposal_id": propose_article_edit(store, args.file, args.statement),
