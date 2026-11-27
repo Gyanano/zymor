@@ -38,6 +38,10 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     distill.add_argument("--title", help="创建条目时指定标题")
     distill.add_argument("--base-revision", type=int, default=0)
 
+    semantic = sub.add_parser("distill-semantic", help="试点语义归并和冲突识别")
+    semantic.add_argument("item_prefix", help="新条目的标识前缀")
+    semantic.add_argument("query", help="用于搜集同一主题材料的原文关键词")
+
     propose = sub.add_parser("propose", help="从原文提交待审知识")
     propose.add_argument("item_id")
     propose.add_argument("--title", help="创建条目时指定标题")
@@ -55,6 +59,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
 
     approve = sub.add_parser("approve", help="由所有者核准一个提案")
     approve.add_argument("proposal_id", type=int)
+    approve.add_argument("--choose", help="核对冲突后，从 review 的口径中选定一个")
     approve.add_argument("--markdown-dir", type=Path, help="核准后更新目录中的 Markdown")
 
     show = sub.add_parser("show", help="查看当前核准版本")
@@ -108,6 +113,8 @@ def _run(store: KnowledgeStore, args: argparse.Namespace) -> dict[str, Any] | No
                 base_revision=args.base_revision,
             )
             return {"proposal_id": proposal, "status": "pending"}
+        case "distill-semantic":
+            return {"proposals": store.distill_semantic(args.item_prefix, args.query)}
         case "propose-article":
             return {
                 "proposal_id": propose_article_edit(store, args.file, args.statement),
@@ -116,7 +123,7 @@ def _run(store: KnowledgeStore, args: argparse.Namespace) -> dict[str, Any] | No
         case "review":
             return store.review(args.proposal_id)
         case "approve":
-            approved = store.approve(args.proposal_id)
+            approved = store.approve(args.proposal_id, choose=args.choose)
             result = asdict(approved)
             if args.markdown_dir is not None:
                 try:
