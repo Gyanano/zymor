@@ -91,13 +91,13 @@ def test_queue_keeps_stages_and_sources_separate_and_detects_same_fragment_confl
     a = tmp_path / "game-a.md"
     b = tmp_path / "game-b.md"
     a.write_text(
-        "第一晚是教学夜，整晚同一时间只接待一位。"
-        "普通营业从第二晚开始能同时接待两位，第四晚增至三位，第八晚起最多四位。"
-        "无尽模式第二晚解锁，起步就能同时接待三位。"
-        "无尽模式第二晚解锁，起步就能同时接待四位。",
+        "第一晚是教学夜，整晚同一时间只接待四位。"
+        "普通营业从第二晚开始能同时接待一位，第四晚增至两位，第八晚起最多三位。"
+        "无尽模式第二晚解锁，起步就能同时接待一位。"
+        "无尽模式第二晚解锁，起步就能同时接待两位。",
         encoding="utf-8",
     )
-    b.write_text("无尽模式第二晚解锁，起步就能同时接待一位。", encoding="utf-8")
+    b.write_text("无尽模式第二晚解锁，起步就能同时接待四位。", encoding="utf-8")
     run("import", str(a), str(b))
     drafts = run("distill-semantic", "game", "接待")["proposals"]
     assert len(drafts) == 4
@@ -108,7 +108,7 @@ def test_queue_keeps_stages_and_sources_separate_and_detects_same_fragment_confl
     }
     (conflict,) = [draft for draft in drafts if draft["status"] == "pending_conflict"]
     options = run("review", str(conflict["proposal_id"]))["conflict"]
-    assert set(options) == {"三位", "四位"}
+    assert set(options) == {"一位", "两位"}
     for value, refs in options.items():
         assert [(ref["title"], ref["quote"]) for ref in refs] == [
             ("game-a", f"无尽模式第二晚解锁，起步就能同时接待{value}。")
